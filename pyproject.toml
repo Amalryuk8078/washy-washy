@@ -1,0 +1,69 @@
+[project]
+name = "washy-washy-backend"
+version = "0.1.0"
+description = "Washy Washy laundry-service platform backend (FastAPI foundation)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    # passlib 1.7.4 (unmaintained since 2020) does its own internal
+    # bcrypt self-test on first use, which raises ValueError under
+    # bcrypt>=4.1's stricter 72-byte-password enforcement — breaking
+    # hash_password()/verify_password() entirely. Pinned below 4.1 until
+    # passlib is replaced or fixed upstream.
+    "bcrypt>=4.0.0,<4.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27.0",
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core", "src/washy_washy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# One event loop for the whole test session, not one per test function.
+# core/database/engine.py's get_engine()/get_session_factory() are
+# @lru_cache singletons (matching production, where one event loop runs
+# for the process's lifetime) — asyncpg connections are bound to the loop
+# that created them, so a per-test loop breaks the cached pool on the
+# second test that uses it.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "washy_washy"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's `Depends(...)` / `Query(...)` in argument defaults is the
+# standard dependency-injection idiom, not the mutable-default footgun B008
+# guards against.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body"]

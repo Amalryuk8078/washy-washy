@@ -1,0 +1,221 @@
+/* Washy Washy — branded Swagger UI / ReDoc skin.
+   Layered on top of the stock swagger-ui-dist / ReDoc CSS loaded from the
+   CDN (see docs/swagger_ui.py) — this file only overrides, never replaces. */
+
+:root {
+  --ww-primary: #0e7490;
+  --ww-primary-light: #06b6d4;
+  --ww-primary-dark: #0b5566;
+  --ww-accent: #a5f3fc;
+  --ww-bg: #f8fafc;
+  --ww-surface: #ffffff;
+  --ww-border: #e2e8f0;
+  --ww-text: #0f172a;
+  --ww-text-muted: #475569;
+  --ww-radius: 10px;
+  --ww-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ww-primary: #22d3ee;
+    --ww-primary-light: #67e8f9;
+    --ww-primary-dark: #0e7490;
+    --ww-accent: #164e63;
+    --ww-bg: #0b1120;
+    --ww-surface: #111827;
+    --ww-border: #1f2937;
+    --ww-text: #e2e8f0;
+    --ww-text-muted: #94a3b8;
+    --ww-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+
+  html, body {
+    background: var(--ww-bg);
+  }
+
+  .swagger-ui,
+  .swagger-ui .scheme-container,
+  redoc {
+    background: var(--ww-bg);
+    color: var(--ww-text);
+  }
+
+  .swagger-ui .opblock .opblock-summary,
+  .swagger-ui .opblock-body,
+  .swagger-ui .responses-inner,
+  .swagger-ui table thead tr th,
+  .swagger-ui .parameters-col_description,
+  .swagger-ui select,
+  .swagger-ui input[type="text"],
+  .swagger-ui textarea {
+    background: var(--ww-surface);
+    color: var(--ww-text);
+    border-color: var(--ww-border) !important;
+  }
+
+  .swagger-ui .opblock-tag,
+  .swagger-ui .opblock .opblock-section-header {
+    background: var(--ww-surface);
+    color: var(--ww-text);
+  }
+
+  .swagger-ui .info .title,
+  .swagger-ui .info li,
+  .swagger-ui .info p,
+  .swagger-ui .model-title,
+  .swagger-ui .opblock-summary-description {
+    color: var(--ww-text);
+  }
+}
+
+/* ---- layout basics ---- */
+
+html, body {
+  background: var(--ww-bg);
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+}
+
+.swagger-ui .topbar {
+  display: none !important;
+}
+
+/* ---- brand header (injected by swagger_ui.py) ---- */
+
+.ww-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 28px;
+  background: linear-gradient(135deg, var(--ww-primary) 0%, var(--ww-primary-dark) 100%);
+  color: #ffffff;
+  box-shadow: var(--ww-shadow);
+  flex-wrap: wrap;
+}
+
+.ww-header__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #ffffff;
+  text-decoration: none;
+}
+
+.ww-header__logo {
+  width: 26px;
+  height: 26px;
+  color: #ffffff;
+}
+
+.ww-header__title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.ww-header__nav {
+  display: flex;
+  gap: 20px;
+}
+
+.ww-header__nav a {
+  color: rgba(255, 255, 255, 0.85);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  padding: 6px 4px;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.ww-header__nav a:hover {
+  color: #ffffff;
+  border-bottom-color: var(--ww-accent);
+}
+
+/* ---- Swagger UI ---- */
+
+.swagger-ui .info {
+  margin: 28px 0;
+}
+
+.swagger-ui .info .title {
+  color: var(--ww-primary-dark);
+  font-weight: 700;
+}
+
+.swagger-ui .info .title small.version-stamp {
+  background: var(--ww-primary);
+}
+
+.swagger-ui .scheme-container {
+  background: transparent;
+  box-shadow: none;
+  padding: 0 0 12px;
+}
+
+.swagger-ui .opblock-tag {
+  border-bottom: 1px solid var(--ww-border);
+  font-weight: 600;
+}
+
+.swagger-ui .opblock-tag:hover {
+  background: var(--ww-accent);
+  opacity: 0.9;
+}
+
+.swagger-ui .opblock {
+  border-radius: var(--ww-radius);
+  box-shadow: var(--ww-shadow);
+  border: 1px solid var(--ww-border);
+  margin: 0 0 12px;
+}
+
+.swagger-ui .opblock .opblock-summary {
+  border-radius: var(--ww-radius);
+}
+
+.swagger-ui .btn.authorize {
+  color: var(--ww-primary-dark);
+  border-color: var(--ww-primary);
+}
+
+.swagger-ui .btn.authorize svg {
+  fill: var(--ww-primary);
+}
+
+.swagger-ui .btn.execute {
+  background: var(--ww-primary);
+  border-color: var(--ww-primary);
+  border-radius: 6px;
+}
+
+.swagger-ui .btn.execute:hover {
+  background: var(--ww-primary-dark);
+}
+
+.swagger-ui select,
+.swagger-ui input[type="text"],
+.swagger-ui textarea {
+  border-radius: 6px;
+}
+
+.swagger-ui .response-col_status {
+  font-weight: 600;
+}
+
+.swagger-ui table tbody tr td {
+  vertical-align: top;
+}
+
+/* ---- ReDoc ---- */
+
+redoc .menu-content {
+  border-right: 1px solid var(--ww-border) !important;
+}

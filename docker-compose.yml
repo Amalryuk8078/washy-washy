@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-washy_washy}
+      POSTGRES_USER: ${POSTGRES_USER:-washy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-washy} -d ${POSTGRES_DB:-washy_washy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-washy}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-washy_washy}
+      POSTGRES_HOST: postgres
+    ports:
+      # Host 8080 -> container 8000: 8000 is a common default other
+      # projects' compose stacks also grab, so this avoids colliding with
+      # them on a shared dev machine. The app inside the container still
+      # listens on 8000 (Dockerfile EXPOSE/CMD), unchanged.
+      - "8080:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+.venv/
+venv/
+env/
+ENV/
+
+*.egg-info/
+dist/
+build/
+
+.env
+.env.*
+!.env.example
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+.vscode/
+.idea/
+
+# Local, non-Docker PostgreSQL data dir (see README "Local PostgreSQL
+# without Docker") — a per-machine dev database, never committed.
+.pgdata/
+
+*.log
+
+.DS_Store
+Thumbs.db
