@@ -43,6 +43,11 @@ TAGS_METADATA: list[dict[str, Any]] = [
         "description": "Where Washy Washy operates. Reading is open to any authenticated "
         "caller; creating a new one requires the `ADMIN` role.",
     },
+    {
+        "name": "roles",
+        "description": "Admin-only role management — granting/revoking roles on other users. "
+        "Every operation here requires the `ADMIN` role.",
+    },
 ]
 
 API_DESCRIPTION = """

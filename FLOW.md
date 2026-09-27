@@ -941,6 +941,14 @@ HTTP level in `api/test_protected_routes_require_auth.py`) and continues
 calling them directly for deeper RBAC-specific scenarios in
 `integration/test_service_areas.py`, matching the pattern Phase 3
 established.
+- `integration/test_role_management.py` (admin role management
+  addendum) — `list_assignable_roles` includes the seeded roles; grant/
+  revoke round-trip; duplicate grant is `ConflictException`; granting/
+  revoking for a nonexistent user, a nonexistent role, or an inactive
+  role all raise `NotFoundException`; revoking an unassigned role raises
+  `NotFoundException`; an admin cannot revoke their own `ADMIN` role but
+  a *different* admin can; `get_user`/`get_user_by_email` round-trip and
+  404 when not found.
 
 ## 9. Current status (keep this section accurate)
 
@@ -952,27 +960,64 @@ established.
 | `core/models` — operational user domain | Implemented (Phase 4): `CustomerProfile`, `PartnerProfile`/`PartnerStatus`, `Address`/`AddressLabel`, `ServiceArea`, `ServiceAreaPostalCode` — **no other domain models yet** (catalog, orders, payments, ... are later phases) |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
 | `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 5 revisions (identity+RBAC core tables → RBAC associations → seed foundational roles → profile/address tables → service area tables). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 11 tables exist, 4 roles seeded, full `pytest` suite (163 tests) passes with 0 skips against it |
-| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas` (routes + controllers) — most endpoints now require authentication; `POST /service-areas` requires `ADMIN` |
+| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles` (routes + controllers) — most endpoints now require authentication; `POST /service-areas` and all of `roles` require `ADMIN` |
 | `washy_washy/services` | Implemented: `auth_service.py` (`AuthService`), `rbac_service.py` (`RBACService`), `profile_service.py` (`ProfileService`), `address_service.py` (`AddressService`), `service_area_service.py` (`ServiceAreaService`) |
 | `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo` |
 | `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission` — **now wired** (Phase 4: every new route except `GET /service-areas` uses `get_current_user`; `POST /service-areas` also uses `require_role`) |
 | `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc` (custom CSS + favicon + header, layered on stock swagger-ui-dist/ReDoc), `custom_openapi` (tag metadata for all 7 tags + response-envelope description). OpenAPI now shows the `HTTPBearer` "Authorize" padlock on every Phase 4 operation (auto-added by FastAPI once a route depends on `get_current_user`) |
 | `washy_washy/utils` | Empty scaffold |
 | Auth (`/auth/register\|login\|refresh`, JWT issuance/verification) | Implemented (Phase 2) |
-| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), **enforced since Phase 4** on `POST /service-areas`; no authorization *middleware* (route-level `dependencies=[...]` only), no admin API for managing role/permission assignments — tests grant roles by calling `UserRoleRepository` directly |
+| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), **enforced since Phase 4** on `POST /service-areas` and, as of this update, all of `/roles`/`/users/{id}/roles`; no authorization *middleware* (route-level `dependencies=[...]` only) |
+| Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — `RBACService.{list_assignable_roles,get_user,get_user_by_email,grant_role_by_name,revoke_role_by_name}`; an admin cannot revoke their own `ADMIN` role |
 | Catalog / Pricing / Orders / Payments | Not started |
 | Redis / Celery / APISIX | Not introduced |
-| Docker (`docker compose up --build`) | **Verified**, including with Phase 4's changes: rebuilt (`docker compose up -d --build`), `alembic upgrade head` run inside the `api` container, registration/full address flow hit through the container on port `8080` and worked correctly (including the `eager_defaults` fix). Two infra bugs (Docker Desktop's WSL2 networking, `.dockerignore` excluding `tests/`/`README.md`) were found and fixed in an earlier update — see the changelog below. |
+| Docker (`docker compose up --build`) | **Verified**, including with Phase 4's changes: rebuilt (`docker compose up -d --build`), `alembic upgrade head` run inside the `api` container, registration/full address flow hit through the container on port `8080` and worked correctly (including the `eager_defaults` fix). Two infra bugs (Docker Desktop's WSL2 networking, `.dockerignore` excluding `tests/`/`README.md`) were found and fixed in an earlier update — see the changelog below. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again since (same root cause, not a new bug). |
 
 Roadmap (see `README.md` for the full phase list): Phase 0 (foundation) →
 Phase 1A–1D (database + identity/RBAC models) → Phase 2 Authentication →
-Phase 3 RBAC runtime → **(this update) Phase 4: Users/Profiles/
-Addresses/Service Areas** → Phase 5 Catalog → ... → Phase 14
-Production/AWS.
+Phase 3 RBAC runtime → Phase 4: Users/Profiles/Addresses/Service Areas →
+**(this update) admin role management** → Phase 5 Catalog → ... →
+Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-23 (latest)** — Phase 4, Users / Profiles / Addresses /
+- **2026-09-27 (latest)** — Admin role management API (closes a gap
+  Phase 3/4 explicitly left open):
+  - Added `RBACService.{list_assignable_roles,get_user,get_user_by_email,
+    grant_role_by_name,revoke_role_by_name}`; `washy_washy/schemas/role.py`
+    (`GrantRoleRequest`, `RoleResponse`); `washy_washy/api/v1/
+    {routes,controllers}/roles.py` — `GET /roles`, `GET/POST
+    /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`, all
+    `ADMIN`-only via router-level `dependencies=[Depends(require_role(...))]`.
+    Added `ROLE_ALREADY_ASSIGNED`/`ROLE_NOT_ASSIGNED`/
+    `CANNOT_REMOVE_OWN_ADMIN_ROLE` to `error_{codes,messages}.py`.
+  - Also picked up and finished a second pending improvement found
+    already-drafted but uncommitted from an interrupted prior session:
+    `core/exceptions/handlers.py`'s `RequestValidationError` handler now
+    returns structured per-field errors (`{"errors": [{"field",
+    "message", "type"}, ...]}` in `data`) instead of a bare message, and
+    logs the failure — deliberately excluding Pydantic's raw `"input"`
+    (can echo secrets like passwords) and `"ctx"` (can hold
+    non-JSON-serializable objects).
+  - Installed and configured **pre-commit** per an explicit request:
+    `.pre-commit-config.yaml` (check-yaml, end-of-file-fixer,
+    trailing-whitespace, detect-private-key, pretty-format-json, ruff,
+    ruff-format), `pre-commit install` run (hook active at
+    `.git/hooks/pre-commit`), added to `pyproject.toml` dev deps.
+    `pre-commit run --all-files` passed clean; ruff-format reformatted
+    a number of files (collapsing short multi-line calls) as a
+    one-time consequence of enabling it — not a logic change.
+  - **Verification**: `ruff check .` clean; `pytest` — **175 passed, 0
+    failed** against live PostgreSQL (up from 163 — 12 new role-
+    management tests). Live `uvicorn` smoke test: registered a user,
+    granted them `ADMIN` via direct SQL (the only way in, by design),
+    confirmed `GET /roles` lists all four seeded roles, and confirmed
+    the self-revoke protection returns `422
+    CANNOT_REMOVE_OWN_ADMIN_ROLE`. Docker Desktop's engine had stopped
+    again since the last verification (same intermittent WSL2 issue,
+    not a new bug) — recovered with the documented `wsl --shutdown` +
+    relaunch fix, then re-verified against the container's Postgres too.
+- **2026-09-23** — Phase 4, Users / Profiles / Addresses /
   Service Areas:
   - Added `core/models/{customer_profile,partner_profile,address,
     service_area,service_area_postal_code}.py`

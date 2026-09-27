@@ -23,3 +23,8 @@ AUTH_PHONE_ALREADY_EXISTS = "An account with this phone number already exists."
 CUSTOMER_PROFILE_ALREADY_EXISTS = "A customer profile already exists for this account."
 PARTNER_PROFILE_ALREADY_EXISTS = "A partner profile already exists for this account."
 SERVICE_AREA_NAME_ALREADY_EXISTS = "A service area with this name already exists."
+
+# Role management
+ROLE_ALREADY_ASSIGNED = "The user already has this role."
+ROLE_NOT_ASSIGNED = "The user does not have this role."
+CANNOT_REMOVE_OWN_ADMIN_ROLE = "You cannot remove your own ADMIN role."

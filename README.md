@@ -90,13 +90,13 @@ washy-washy-backend/
 │       ├── __main__.py      # `python -m washy_washy`
 │       ├── config.py        # service-level Settings(CoreSettings)
 │       ├── api/v1/routes/   # health, auth, users, customers, addresses,
-│       │                    # service_areas
+│       │                    # service_areas, roles
 │       ├── api/v1/controllers/  # same set
 │       ├── dependencies/    # auth.py: get_current_user
 │       │                    # rbac.py: require_role, require_permission
 │       ├── constants/       # error codes / messages (AUTH_*, profile/
-│       │                    # service-area conflict codes)
-│       ├── schemas/         # common, auth, profile, address, service_area
+│       │                    # service-area/role conflict codes)
+│       ├── schemas/         # common, auth, profile, address, service_area, role
 │       ├── repositories/    # user, role, permission, user_role,
 │       │                    # role_permission, customer_profile,
 │       │                    # partner_profile, address, service_area
@@ -581,6 +581,32 @@ on a second request) and via a regression test
 (`tests/integration/test_addresses.py::test_create_default_address_response_serializes_without_error`)
 that was confirmed to fail without the fix before being left in place.
 
+## Admin role management API
+
+Closes a gap Phase 3/4 explicitly left open: an admin API for granting/
+revoking roles, rather than reaching into `UserRoleRepository` directly
+(which is still how tests bootstrap the very first ADMIN grant — there's
+no other way in, by design: nothing self-elevates).
+
+```text
+GET    /api/v1/roles                         -> assignable (active) roles
+GET    /api/v1/users/{user_id}/roles         -> a user's roles
+POST   /api/v1/users/{user_id}/roles         -> grant {"role_name": "..."}
+DELETE /api/v1/users/{user_id}/roles/{name}  -> revoke
+```
+
+All four require the `ADMIN` role (router-level
+`dependencies=[Depends(require_role(RoleName.ADMIN.value))]` —
+`washy_washy/api/v1/routes/roles.py`). Logic lives in
+`RBACService.{list_assignable_roles,get_user,get_user_by_email,
+grant_role_by_name,revoke_role_by_name}`. Granting a role an admin
+already has, or revoking one they don't have, is a clean `409`/`404`
+(existence pre-checked; the underlying `(user_id, role_id)` unique
+constraint still guards the race). **An admin cannot revoke their own
+`ADMIN` role** (`422 CANNOT_REMOVE_OWN_ADMIN_ROLE`) — otherwise the last
+admin could accidentally lock everyone, including themselves, out of
+role management; another admin can still revoke it for them.
+
 ## Database setup / Alembic
 
 Migrations are owned by `core` (models live in `core/models/`); the
@@ -753,8 +779,6 @@ Phase 14  Production / AWS
 Phase 4 deliberately stops at the operational user domain: no
 `/partners/me` endpoint (the model/service exist, unexposed), no
 permission-enforcement *middleware* (route-level `dependencies=[...]`
-only), no admin API for managing role assignments (an operator still
-has to grant `ADMIN` via direct DB access or a script — see "Running
-tests"/`RoleRepository` for how the integration tests do it), and no
-availability/slot-capacity enforcement on serviceability (that's Phase
+only), and no availability/slot-capacity enforcement on serviceability
+(that's Phase
 7). Catalog/pricing/orders/payments are not started.

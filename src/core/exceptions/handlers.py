@@ -62,8 +62,8 @@ class InternalErrorException(AppException):
     code = "INTERNAL_SERVER_ERROR"
 
 
-def _error_body(message: str, code: str) -> dict:
-    return {"success": False, "message": message, "code": code, "data": None}
+def _error_body(message: str, code: str, data: object = None) -> dict:
+    return {"success": False, "message": message, "code": code, "data": data}
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -78,9 +78,22 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def handle_validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        # Only loc/msg/type: the raw "input" may echo secrets (e.g. passwords)
+        # and "ctx" can hold non-JSON-serialisable exception objects.
+        errors = [
+            {
+                "field": ".".join(str(part) for part in err["loc"]),
+                "message": err["msg"],
+                "type": err["type"],
+            }
+            for err in exc.errors()
+        ]
+        logger.info("Request validation failed: %s %s %s", request.method, request.url.path, errors)
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content=_error_body("Request validation failed", "VALIDATION_ERROR"),
+            content=_error_body(
+                "Request validation failed", "VALIDATION_ERROR", {"errors": errors}
+            ),
         )
 
     @app.exception_handler(Exception)
