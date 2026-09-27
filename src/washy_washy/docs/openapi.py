@@ -61,6 +61,13 @@ TAGS_METADATA: list[dict[str, Any]] = [
         "caller; defining hours/availability/slots requires the `ADMIN` role.",
     },
     {
+        "name": "orders",
+        "description": "The central order workflow: creation, scheduling, itemization, price "
+        "finalization, and state transitions. Creating/viewing/scheduling/transitioning your "
+        "own order only requires authentication; itemizing an item and finalizing a price "
+        "require `ADMIN`, `SUPERVISOR`, or `LAUNDRY_PARTNER`.",
+    },
+    {
         "name": "roles",
         "description": "Admin-only role management — granting/revoking roles on other users. "
         "Every operation here requires the `ADMIN` role.",

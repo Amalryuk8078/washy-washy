@@ -1,18 +1,19 @@
 # Washy Washy Backend
 
 FastAPI backend foundation for **Washy Washy**, a laundry-service platform.
-This repository is currently at **Phase 7 — Availability / Slots /
-Capacity**, built on Phase 0–6 (HTTP skeleton, auth, RBAC, users/
-profiles/addresses/service areas, catalog, pricing). Phase 7 adds
-operating hours, partner availability, and pickup/delivery slot
-booking with **race-free capacity reservation**: `PickupSlot`/
-`DeliverySlot` each track `capacity_total`/`capacity_reserved`, guarded
-by a single atomic conditional `UPDATE` (no `SELECT FOR UPDATE`, no
-Redis) so concurrent booking requests can never overbook a slot — this
-is verified under real concurrent load, not just sequential-logic
-tests. An admin role-management API (`/roles`, `/users/{id}/roles`) was
-added as a small addendum between Phase 4 and 5, closing a gap those
-phases explicitly deferred. See the Roadmap.
+This repository is currently at **Phase 8 — Orders / State Machine**,
+built on Phase 0–7 (HTTP skeleton, auth, RBAC, users/profiles/addresses/
+service areas, catalog, pricing, availability/slots/capacity). Phase 8
+adds `Order`/`OrderItem`/`OrderStatusHistory` and the full 24-state
+order lifecycle, with every transition validated against a central
+graph and executed via the same **race-free atomic `UPDATE`** pattern
+Phase 7 used for slot capacity — verified under real concurrent load,
+not just sequential-logic tests. A plain customer may submit/cancel
+their own order; the rest of the pipeline requires staff (`ADMIN`/
+`SUPERVISOR`/`LAUNDRY_PARTNER`). An admin role-management API
+(`/roles`, `/users/{id}/roles`) was added as a small addendum between
+Phase 4 and 5, closing a gap those phases explicitly deferred. See the
+Roadmap.
 
 ## Overview
 
@@ -85,13 +86,14 @@ washy-washy-backend/
 │   │   │                    # PartnerCapability, PricingRule,
 │   │   │                    # MaterialPricingRule, OperatingHours,
 │   │   │                    # PartnerAvailability, PickupSlot, DeliverySlot,
-│   │   │                    # PickupSlotReservation, DeliverySlotReservation
+│   │   │                    # PickupSlotReservation, DeliverySlotReservation,
+│   │   │                    # Order, OrderItem, OrderStatusHistory
 │   │   ├── security/        # password hashing, JWT encode/decode
 │   │   ├── dependencies/    # get_db_session
 │   │   ├── logging/         # structured logging setup
 │   │   ├── middleware/      # request-id correlation middleware
 │   │   ├── exceptions/      # AppException family + FastAPI handlers
-│   │   └── migrations/      # Alembic env.py, versions/ (8 revisions so far)
+│   │   └── migrations/      # Alembic env.py, versions/ (9 revisions so far)
 │   │
 │   └── washy_washy/
 │       ├── main.py          # FastAPI app construction
@@ -99,15 +101,16 @@ washy-washy-backend/
 │       ├── config.py        # service-level Settings(CoreSettings)
 │       ├── api/v1/routes/   # health, auth, users, customers, addresses,
 │       │                    # service_areas, roles, catalog, pricing,
-│       │                    # availability
+│       │                    # availability, orders
 │       ├── api/v1/controllers/  # same set
 │       ├── dependencies/    # auth.py: get_current_user
-│       │                    # rbac.py: require_role, require_permission
+│       │                    # rbac.py: require_role, require_permission,
+│       │                    # require_any_role
 │       ├── constants/       # error codes / messages (AUTH_*, profile/
 │       │                    # service-area/role/catalog/pricing/
-│       │                    # availability conflict codes)
+│       │                    # availability/order conflict codes)
 │       ├── schemas/         # common, auth, profile, address, service_area,
-│       │                    # role, catalog, pricing, availability
+│       │                    # role, catalog, pricing, availability, orders
 │       ├── repositories/    # user, role, permission, user_role,
 │       │                    # role_permission, customer_profile,
 │       │                    # partner_profile, address, service_area,
@@ -116,11 +119,13 @@ washy-washy-backend/
 │       │                    # material_pricing_rule, operating_hours,
 │       │                    # partner_availability, pickup_slot,
 │       │                    # delivery_slot, pickup_slot_reservation,
-│       │                    # delivery_slot_reservation
+│       │                    # delivery_slot_reservation, order, order_item,
+│       │                    # order_status_history
 │       ├── services/        # auth_service, rbac_service, profile_service,
 │       │                    # address_service, service_area_service,
 │       │                    # catalog_service, partner_capability_service,
-│       │                    # pricing_service, availability_service
+│       │                    # pricing_service, availability_service,
+│       │                    # order_service, order_state_service
 │       ├── docs/            # openapi.py (tags + custom_openapi),
 │       │                    # swagger_ui.py (branded /docs, /redoc)
 │       ├── static/          # swagger-custom.css, favicon.svg
@@ -133,14 +138,15 @@ washy-washy-backend/
     ├── unit/                # test_database_foundation, test_alembic_wiring,
     │                        # test_rbac_models, test_auth_tokens_and_schemas,
     │                        # test_phase4_models, test_phase5_models,
-    │                        # test_phase6_models, test_phase7_models
-    │                        # (no DB required)
+    │                        # test_phase6_models, test_phase7_models,
+    │                        # test_phase8_models (no DB required)
     ├── integration/         # test_database_connection, test_user_identity,
     │                        # test_rbac_associations, test_auth,
     │                        # test_rbac_runtime, test_profiles,
     │                        # test_addresses, test_service_areas,
     │                        # test_catalog, test_pricing, test_availability,
-    │                        # test_availability_concurrency
+    │                        # test_availability_concurrency, test_orders,
+    │                        # test_order_state_machine
     │                        # (require a live, migrated DB)
     └── api/                 # test_auth_routes, test_protected_routes_require_auth
                               # (HTTP-level, validation-only, no DB)
@@ -774,6 +780,59 @@ DELETE   /api/v1/delivery-slots/reservations/{id}        -> cancel own reservati
   Documented in `availability_service.py`'s module docstring rather than
   silently glossed over.
 
+## Orders / State Machine (Phase 8)
+
+```text
+POST   /api/v1/orders                            -> create (as customer)
+GET    /api/v1/orders                            -> list own orders
+GET    /api/v1/orders/{id}                       -> own order, or staff
+GET    /api/v1/orders/{id}/history               -> own order's audit trail, or staff
+POST   /api/v1/orders/{id}/transition            -> generic move (ownership/role checked inside)
+POST   /api/v1/orders/{id}/schedule-pickup       -> books a Phase 7 slot + moves to PICKUP_SCHEDULED
+POST   /api/v1/orders/{id}/items/{item_id}/itemize   -> ADMIN/SUPERVISOR/LAUNDRY_PARTNER only
+POST   /api/v1/orders/{id}/finalize-price        -> ADMIN/SUPERVISOR/LAUNDRY_PARTNER only
+```
+
+24-state lifecycle (`DRAFT` through `COMPLETED`, plus exception states
+like `PAYMENT_FAILED`/`CANCELLED`), with the legal transition graph and
+its authorization rules centralized in `order_state_service.py` — no
+route or controller hard-codes "if status == X."
+
+- **`Order` is this project's first genuinely significant business
+  record**, which drove a deliberate foreign-key split: `customer_id`
+  cascades with the user (ownership), but the service area/addresses/
+  slots/reservations it references do not (`ON DELETE RESTRICT`) — a
+  customer deleting an old address, or an admin removing a slot, fails
+  loudly instead of silently erasing an order's history.
+- **`OrderItem`** keeps declared vs. verified material/quantity/weight
+  genuinely separate (inspection never overwrites the customer's
+  original declaration) and snapshots both an *estimated* and a
+  *final* pricing-rule id + line total — exactly what `PricingRule`'s
+  own Phase 6 docstring said Phase 8 would need. Because those rule
+  rows are immutable once closed, a later rate change can never
+  retroactively alter what an item already charged.
+- **Concurrency-safe transitions**, the same pattern as Phase 7's slot
+  capacity: `OrderRepository.try_transition` is one atomic
+  `UPDATE ... WHERE status = :from_status` statement, not a
+  read-then-write. Two concurrent requests moving the same order never
+  both "win" — the loser gets a clean `409 ORDER_STATE_CONFLICT`.
+  Verified under real concurrent load: 8 simultaneous attempts to
+  cancel the *same* order all race for one atomic slot; exactly one
+  succeeds and the order ends with exactly one cancellation recorded in
+  its history, regardless of how the 8 attempts actually interleaved.
+- **Two authorization tiers**: a plain customer may submit
+  (`DRAFT -> PENDING_PAYMENT`) and cancel their own order from most
+  pre-pickup states; everything else (`PICKUP_ASSIGNED` onward)
+  requires staff (`ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER`, via the new
+  `require_any_role` dependency). A disallowed-for-this-caller
+  transition is `403`; a nonexistent/not-your-order is `404`.
+- **Not implemented, by design**: no partner-to-order assignment
+  (Phase 9), no real payment gateway behind `PENDING_PAYMENT ->
+  CONFIRMED` (Phase 10 — currently a plain staff-triggered flip), no
+  delivery-slot scheduling workflow (`delivery_slot_id`/
+  `delivery_reservation_id` columns exist per the spec's field list,
+  unpopulated until Phase 9).
+
 ## Database setup / Alembic
 
 Migrations are owned by `core` (models live in `core/models/`); the
@@ -808,18 +867,20 @@ f04acb897ec2  create pricing tables + care_adjustment (pricing_rules, material_p
 01a11e11a45d  create availability, slots, and capacity (operating_hours, partner_availabilities,
                                                         pickup_slots, delivery_slots,
                                                         pickup_slot_reservations,
-                                                        delivery_slot_reservations, head)
+                                                        delivery_slot_reservations)
+964739b60e1b  create orders and state machine tables  (orders, order_items,
+                                                        order_status_history, head)
 ```
 
-All eight were hand-written to match the models exactly (reviewed rather
+All nine were hand-written to match the models exactly (reviewed rather
 than a raw `--autogenerate` dump, per the project's migration-safety
 rule). `alembic upgrade head` has been run end-to-end against a real
 PostgreSQL instance (both a local install and, separately, the
 `docker-compose` `postgres` container) — schema, seeded roles, and every
 table/index/constraint verified by querying the database directly, plus
-the full `pytest` suite (265 tests) passing with zero skips against it.
+the full `pytest` suite (300 tests) passing with zero skips against it.
 The newest revision's full `upgrade`/`downgrade`/`upgrade` round-trip
-was also run and verified (all 6 Phase 7 tables dropped cleanly on
+was also run and verified (all 3 Phase 8 tables dropped cleanly on
 downgrade, recreated identically on re-upgrade) — see "Running tests"
 below.
 
@@ -874,11 +935,12 @@ Docker" above, then `alembic upgrade head`) and **skips itself cleanly**
 migrated yet — so `pytest` alone is always self-contained whether or not
 a database is up. Each integration test runs inside its own transaction
 that's rolled back on teardown, so they never leave rows behind — except
-`test_availability_concurrency.py`, which deliberately uses independent
-database connections (a genuine race needs separate connections, not one
-connection's savepoints) and cleans up manually in a `finally` block.
-Verified end-to-end against a real PostgreSQL instance: **265 passed, 0
-skipped, 0 failed** (up from 235 as of Phase 6) — reproducibly, from a
+`test_availability_concurrency.py` and `test_order_state_machine.py`'s
+concurrency test, which deliberately use independent database
+connections (a genuine race needs separate connections, not one
+connection's savepoints) and clean up manually in a `finally` block.
+Verified end-to-end against a real PostgreSQL instance: **300 passed, 0
+skipped, 0 failed** (up from 265 as of Phase 7) — reproducibly, from a
 cold shell with nothing pre-exported.
 (`tests/conftest.py`'s `DATABASE_URL`/`JWT_SECRET` fallback only applies
 when no `.env` exists — it used to apply unconditionally via
@@ -945,8 +1007,8 @@ Phase 3   RBAC runtime (require_role/require_permission)
 Phase 4   Users / Profiles / Addresses / Service Areas
 Phase 5   Catalog + Services + Materials
 Phase 6   Pricing Engine
-Phase 7   Availability + Slots + Capacity                               ← you are here
-Phase 8   Orders + State Machine
+Phase 7   Availability + Slots + Capacity
+Phase 8   Orders + State Machine                                        ← you are here
 Phase 9   Partner Operations
 Phase 10  Payments + Invoices + Refunds
 Phase 11  Redis + Celery
@@ -955,8 +1017,8 @@ Phase 13  Flutter Integration
 Phase 14  Production / AWS
 ```
 
-Phase 7 deliberately stops at availability: no partner-to-area or
-partner-to-order assignment (Phase 9), no `Order` to attach a booking to
-(Phase 8), and `has_capable_partner` exists but is a known, documented,
-unenforced global check rather than a (currently impossible)
-area-scoped one. Orders/payments are not started.
+Phase 8 deliberately stops at orders: no partner-to-order assignment
+(Phase 9), no real payment gateway behind `PENDING_PAYMENT ->
+CONFIRMED` (Phase 10 — currently a plain staff-triggered status flip),
+and no delivery-slot scheduling workflow (the columns exist per the
+spec's field list, unpopulated). Payments are not started.

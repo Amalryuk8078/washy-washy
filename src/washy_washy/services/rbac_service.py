@@ -64,6 +64,19 @@ class RBACService:
         result = await self._session.execute(stmt)
         return result.first() is not None
 
+    async def has_any_role(self, user_id: uuid.UUID, role_names: list[str]) -> bool:
+        """Reuses ``has_role`` rather than a separate query — this is
+        still "the one place authorization SQL lives," just called
+        once per candidate role instead of writing an ``IN (...)``
+        variant for what is, in practice, always a short, fixed list
+        (e.g. the "is this caller staff" check in Phase 8's order
+        endpoints).
+        """
+        for role_name in role_names:
+            if await self.has_role(user_id, role_name):
+                return True
+        return False
+
     async def has_permission(
         self, user_id: uuid.UUID, resource: str, action: str, scope: str
     ) -> bool:

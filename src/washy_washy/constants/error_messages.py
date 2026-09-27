@@ -44,3 +44,13 @@ UNKNOWN_PRICING_MODEL = "This service's pricing model is not recognized."
 # Availability / slots / capacity (Phase 7)
 SLOT_CAPACITY_EXCEEDED = "This slot does not have enough remaining capacity."
 RESERVATION_NOT_ACTIVE = "This reservation is not active."
+
+# Orders / state machine (Phase 8)
+ADDRESS_NOT_SERVICEABLE = "This address is not within any active service area."
+ORDER_ITEMS_REQUIRED = "An order must have at least one item."
+INVALID_ORDER_STATE_TRANSITION = (
+    "This status transition is not allowed from the order's current status."
+)
+ORDER_STATE_CONFLICT = (
+    "The order's status changed before this transition could be applied. Please retry."
+)

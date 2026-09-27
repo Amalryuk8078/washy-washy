@@ -39,6 +39,24 @@ def require_role(role_name: str) -> Callable[..., Awaitable[User]]:
     return dependency
 
 
+def require_any_role(*role_names: str) -> Callable[..., Awaitable[User]]:
+    """Like ``require_role``, but grants access if the caller holds
+    *any* of several roles — e.g. an order operation that any of
+    ``ADMIN``/``SUPERVISOR``/``LAUNDRY_PARTNER`` ("staff") may perform,
+    without needing three separate ``require_role`` dependencies.
+    """
+
+    async def dependency(
+        current_user: User = Depends(get_current_user),
+        db_session: AsyncSession = Depends(get_db_session),
+    ) -> User:
+        if not await RBACService(db_session).has_any_role(current_user.id, list(role_names)):
+            raise ForbiddenException(error_messages.FORBIDDEN, error_codes.FORBIDDEN)
+        return current_user
+
+    return dependency
+
+
 def require_permission(resource: str, action: str, scope: str) -> Callable[..., Awaitable[User]]:
     async def dependency(
         current_user: User = Depends(get_current_user),

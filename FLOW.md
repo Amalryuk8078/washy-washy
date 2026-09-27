@@ -9,21 +9,23 @@
 ## 1. What this is
 
 FastAPI backend for **Washy Washy**, a laundry-service platform. Single
-**modular monolith** (not microservices). Currently at **Phase 7 —
-Availability / Slots / Capacity**, built on Phase 0–6 (HTTP skeleton,
-auth, RBAC, users/profiles/addresses/service areas, catalog, pricing).
-Phase 7 adds operating hours, partner availability, and pickup/delivery
-slot booking with race-free capacity reservation: `PickupSlot`/
-`DeliverySlot` each carry a `capacity_total`/`capacity_reserved` pair
-guarded by an atomic conditional `UPDATE` (no `SELECT FOR UPDATE`, no
-Redis) so concurrent bookings can never overbook a slot, and
-`PickupSlotReservation`/`DeliverySlotReservation` record who booked
-how much. An admin role-management API was added as a small addendum
-between Phase 4 and 5, closing a gap those phases explicitly deferred.
-This environment's database/migrations/Docker have all been verified
-end-to-end against a real PostgreSQL (265/265 tests passing) and
-`/docs`/`/redoc` carry Washy Washy branding — see §6e–§6j and the
-changelog. Orders/payments are not yet implemented.
+**modular monolith** (not microservices). Currently at **Phase 8 —
+Orders / State Machine**, built on Phase 0–7 (HTTP skeleton, auth,
+RBAC, users/profiles/addresses/service areas, catalog, pricing,
+availability/slots/capacity). Phase 8 adds `Order`/`OrderItem`/
+`OrderStatusHistory` and the full 24-state order lifecycle
+(`OrderStatus`), with every transition validated against a central,
+hand-written transition graph and executed via the same atomic
+conditional-`UPDATE` pattern Phase 7 used for capacity — so two
+concurrent requests can never both move an order at once. A plain
+customer may submit/cancel their own order; the rest of the pipeline
+(confirmation onward) requires staff (`ADMIN`/`SUPERVISOR`/
+`LAUNDRY_PARTNER`). An admin role-management API was added as a small
+addendum between Phase 4 and 5, closing a gap those phases explicitly
+deferred. This environment's database/migrations/Docker have all been
+verified end-to-end against a real PostgreSQL (300/300 tests passing)
+and `/docs`/`/redoc` carry Washy Washy branding — see §6e–§6k and the
+changelog. Payments are not yet implemented.
 
 Target system context (only FastAPI + PostgreSQL exist today; the rest are
 future phases):
@@ -846,6 +848,144 @@ DELETE   /delivery-slots/reservations/{id}        -> cancel own reservation
   limitation is documented in `availability_service.py`'s own module
   docstring, not silently glossed over.
 
+### 6k. Orders / state machine (`washy_washy/{services/{order_service,order_state_service},repositories/{order_repo,order_item_repo,order_status_history_repo},api/v1/{routes,controllers}/orders,schemas/orders}.py`) — Phase 8
+
+```text
+POST   /orders                            -> create (any authenticated caller, as customer)
+GET    /orders                            -> list own orders
+GET    /orders/{id}                       -> own order, or staff (any)
+GET    /orders/{id}/history               -> own order's audit trail, or staff
+POST   /orders/{id}/transition            -> generic move; ownership/role validated inside the service
+POST   /orders/{id}/schedule-pickup       -> books a Phase 7 pickup slot + moves to PICKUP_SCHEDULED
+POST   /orders/{id}/items/{item_id}/itemize   -> ADMIN/SUPERVISOR/LAUNDRY_PARTNER only
+POST   /orders/{id}/finalize-price        -> ADMIN/SUPERVISOR/LAUNDRY_PARTNER only
+```
+
+- **`Order`/`OrderItem`/`OrderStatusHistory`** — Order is this
+  project's first genuinely significant business record, which drove a
+  deliberate split in its foreign keys: `customer_id` is `ON DELETE
+  CASCADE` (ownership — an order has no meaning without the customer
+  who placed it, same reasoning as `Address.user_id`), but
+  `service_area_id`/`pickup_address_id`/`delivery_address_id`/
+  `pickup_slot_id`/`delivery_slot_id`/`pickup_reservation_id`/
+  `delivery_reservation_id` deliberately have **no** `ondelete`
+  (default `RESTRICT`) — these are references to independent
+  resources, and cascading an order away because a customer deleted an
+  old address, or an admin removed a slot, would silently destroy
+  operational history for no benefit. Deleting an address/slot a live
+  order still points at now fails loudly instead. `OrderItem` keeps
+  **declared vs. verified fields genuinely separate** (never
+  overwriting one with the other) and a **pricing snapshot pair**
+  (`estimated_*`/`final_*` pricing-rule ids + line totals) — exactly
+  what `PricingRule`'s own docstring predicted back in Phase 6
+  ("Persisting *which* rule version produced a given historical price
+  is Phase 8's job"). Because those rule rows are immutable once
+  closed, a later rate change can never retroactively alter what an
+  item already charged.
+  - The two `OrderItem` FKs to `material_pricing_rules` use an
+    **explicit, shortened constraint name**
+    (`fk_order_items_est_material_rule_id`/`..._final_material_rule_id`)
+    instead of the naming convention's derived one, which would exceed
+    PostgreSQL's 63-byte identifier limit — the same class of problem
+    that renamed `partner_service_capabilities` in Phase 5, this time
+    fixed by overriding the constraint name rather than the column
+    name.
+  - **`OrderStatusHistory`** uses `CreatedAtMixin` (append-only, no
+    `updated_at` — same as `UserRole`/`RolePermission`). Its
+    `changed_by_user_id` FK uses `ON DELETE SET NULL`, not `CASCADE` —
+    the one deliberately different user-owned FK in this project: an
+    audit trail's whole purpose is to survive the actor's account
+    being deleted, with the actor field cleared, not disappear with
+    them. The DB column is literally named `metadata` (the spec's own
+    field name) but the Python attribute is `extra_data`, since
+    `metadata` is reserved on every SQLAlchemy declarative model
+    (`Base.metadata`).
+- **The transition graph** (`order_state_service.py::ALLOWED_TRANSITIONS`)
+  is the one place a move is validated — nothing elsewhere hard-codes
+  "if status == X." Terminal states (`COMPLETED`, `CANCELLED`) map to
+  an empty transition set, which is what actually enforces the spec's
+  example rule ("do not allow `COMPLETED -> DRAFT`") and every other
+  backwards move, not just that one. A `QUALITY_CHECK -> PROCESSING`
+  edge models the rework loop for a failed QC pass — the only cycle in
+  an otherwise linear-ish graph.
+- **Concurrency safety mirrors Phase 7's capacity reservation exactly**:
+  `OrderRepository.try_transition` is `UPDATE orders SET status =
+  :to WHERE id = :id AND status = :from` — one atomic statement, not a
+  read-then-write. Two concurrent requests trying to move the same
+  order never both "win": whichever commits first changes the row, the
+  loser's `WHERE` clause matches zero rows and raises
+  `ORDER_STATE_CONFLICT` (409) instead of silently clobbering the
+  winner. **Verified under genuine concurrent load**, not just
+  sequential-logic assertions — `test_order_state_machine.py` fires 8
+  concurrent attempts to cancel the *same* `DRAFT` order (deliberately
+  targeting the identical transition, not two different ones, since
+  two different-but-both-reachable targets can legitimately both
+  succeed in sequence and wouldn't actually prove anything about the
+  race); exactly one succeeds, the order ends with exactly one
+  `to_status=CANCELLED` history row, and every loser fails with either
+  `ORDER_STATE_CONFLICT` (it lost a real race) or
+  `INVALID_ORDER_STATE_TRANSITION` (it read the order only after the
+  winner had already committed, so `CANCELLED` was no longer legal
+  from `CANCELLED` itself) — both are correct outcomes; more than one
+  success or more than one history row would not be.
+- **Two authorization tiers, not just "authenticated or not"**: most of
+  the pipeline (`PICKUP_ASSIGNED` onward) requires the caller to hold
+  `ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER` ("staff" — `RBACService.
+  has_any_role`, a new method, plus `dependencies/rbac.py::
+  require_any_role`, mirroring `require_role` but for several
+  candidate roles). A plain customer may still request a narrow set of
+  transitions on their *own* order — submitting it (`DRAFT ->
+  PENDING_PAYMENT`) and cancelling it from anywhere cancellation still
+  makes sense as a plain status flip
+  (`order_state_service.py::_CUSTOMER_ALLOWED_TRANSITIONS`). Once
+  physical pickup has actually started (`PICKUP_IN_PROGRESS` or later),
+  cancellation is no longer offered through this generic mechanism —
+  that would need a different domain concept (a refund/rework flow),
+  not implemented until later phases. A transition that's legal in the
+  graph but not permitted for a non-staff caller raises
+  `ForbiddenException` (403 — they know the order exists and is
+  theirs, they're just not allowed to move it *there*); a caller who
+  doesn't own the order at all (and isn't staff) gets
+  `NotFoundException` (404) instead, the same posture as
+  `AddressService`.
+- **`OrderService`** owns *what* an order/item contains;
+  `OrderStateService` owns *what status it's in* — the exact split the
+  spec draws ("do not mix order item state with order state").
+  `OrderService` composes `OrderStateService` (and reuses
+  `PricingService`/`AvailabilityService` exactly as they already exist,
+  the same kind of cross-service composition a controller does, one
+  layer down) for the three operations that change order data *and*
+  move its status in one call: `schedule_pickup` (books Phase 7 slot
+  capacity, then transitions to `PICKUP_SCHEDULED` — if the slot has no
+  room, `AvailabilityService.book_pickup_slot` raises and the status is
+  left untouched), `finalize_pricing` (recomputes each item's price
+  from its *verified* material/quantity/weight, falling back to
+  declared values for any item never itemized, then transitions to
+  `PRICE_FINALIZED`), and `cancel_order`.
+- **Order creation** (`OrderService.create_order`) follows the spec's
+  own workflow exactly: customer -> address -> service area -> service
+  -> estimated pricing -> order draft. The **service area is derived
+  from the pickup address's postal code**, never caller-supplied — it
+  can never be inconsistent with where the order is actually being
+  picked up from, and an unserviceable address is a clean
+  `422 ADDRESS_NOT_SERVICEABLE` rather than a mismatched area silently
+  accepted. Each item's estimate reuses `PricingService.calculate_price`
+  with `rush_charge=delivery_charge=tax=discount=0` to get a pure
+  per-item `subtotal` (base + material + care + quantity/weight); the
+  order-level rush/delivery/tax/discount (still caller-supplied inputs,
+  never stored policy — Phase 6's own design) are added once, at the
+  order level, not per item.
+- **Not implemented, by design**: no partner-to-order assignment or
+  facility/pickup-operator model (Phase 9 — "Partner Operations" is
+  where `PICKUP_ASSIGNED`/`DELIVERY_ASSIGNED` actually pick a partner,
+  not just flip a status), no real payment gateway behind
+  `PENDING_PAYMENT -> CONFIRMED` (Phase 10 — for now that transition is
+  a plain staff-triggered status flip, simulating what a webhook will
+  eventually automate), no delivery-slot scheduling workflow (the
+  `delivery_slot_id`/`delivery_reservation_id` columns exist on `Order`
+  per the spec's field list, but no endpoint populates them yet — that
+  operational detail belongs to Phase 9 alongside delivery assignment).
+
 ### Migrations (`core/migrations/`, Alembic)
 - Owned by `core` since models live in `core/models/`. `washy_washy` has no
   migrations folder of its own.
@@ -888,17 +1028,25 @@ DELETE   /delivery-slots/reservations/{id}        -> cancel own reservation
      `pricing_rules`, `material_pricing_rules` (both independent,
      versioned, partial-unique-indexed), plus `ALTER TABLE
      service_materials ADD COLUMN care_adjustment`.
-  8. `01a11e11a45d` (head) create availability, slots, and capacity
+  8. `01a11e11a45d` create availability, slots, and capacity
      tables — `operating_hours`, `partner_availabilities` (both
      independent, reference `service_areas`/`partner_profiles`
      respectively), then `pickup_slots`/`delivery_slots` (each with its
      two capacity `CHECK` constraints) and `pickup_slot_reservations`/
      `delivery_slot_reservations` (reference their own slot table and
      `users`).
+  9. `964739b60e1b` (head) create orders and state machine tables —
+     `orders` (references `users`, `service_areas`, `addresses` x2,
+     nullably `pickup_slots`/`delivery_slots`/`pickup_slot_reservations`/
+     `delivery_slot_reservations`), then `order_items` (references
+     `orders`, `services`, `materials` x2, nullably `pricing_rules`/
+     `material_pricing_rules` x2 — two of these FKs use an explicit
+     shortened constraint name, see §6k), then `order_status_history`
+     (references `orders` and `users`, the latter `ON DELETE SET NULL`).
   `alembic upgrade head` has been run against real PostgreSQL — both a
   local install and, separately, the `docker-compose` `postgres`
-  container — and verified: all 21 tables exist (`alembic_version` +
-  the 20 above) with the four `RoleName` roles seeded. Every multi-table
+  container — and verified: all 24 tables exist (`alembic_version` +
+  the 23 above) with the four `RoleName` roles seeded. Every multi-table
   revision's full `downgrade` → `upgrade head` round-trip has been run
   and verified at the time it was added (tables dropped cleanly,
   recreated identically) — see §9/§10.
@@ -1276,6 +1424,48 @@ established.
   overbooking under real concurrent load, not just in sequential-logic
   tests. Uses real commits and manually cleans up everything it wrote
   in a `finally` block, since nothing here is rolled back automatically.
+- `unit/test_phase8_models.py` (Phase 8) — no DB required: mapper
+  configuration succeeds, `OrderStatus` has exactly the 24 spec'd
+  values, `orders.status` defaults to `DRAFT`/`estimated_total`
+  defaults to `Decimal("0")`, both `CHECK` constraints are present,
+  `customer_id` cascades while every other `Order` FK does not (§6k's
+  ownership-vs-reference split), the slot/reservation columns are
+  nullable, `OrderItem.declared_material_id` is required while
+  `verified_material_id` is optional, both `OrderItem` line-total
+  `CHECK` constraints are present, `order_id` cascades on `OrderItem`,
+  `OrderStatusHistory` has `created_at` but no `updated_at`,
+  `changed_by_user_id` is `ON DELETE SET NULL` while `order_id` is
+  `CASCADE`, the DB column is literally `metadata` while the Python
+  attribute is `extra_data`, `COMPLETED`/`CANCELLED` are terminal
+  (empty transition sets), `COMPLETED -> DRAFT` is confirmed absent
+  from the graph (the spec's own example), and every `OrderStatus`
+  value has an entry in `ALLOWED_TRANSITIONS` (nothing silently falls
+  back to "no transitions allowed" by omission).
+- `integration/test_orders.py` (Phase 8) — `OrderService` against real
+  PostgreSQL: creating an order computes `estimated_total` correctly
+  (base + quantity charge, and again with rush/tax/discount applied at
+  the order level), creation rejects zero items / a non-serviceable
+  address / an address owned by someone else, ownership on
+  `get_order_for_viewer` (404 for a non-owner non-staff, staff can view
+  regardless), listing only returns the caller's own orders, itemizing
+  records verified fields without touching the declared ones (and
+  rejects an item/order-id mismatch), and finalizing pricing after
+  itemization uses the *verified* quantity (not the declared one) and
+  correctly moves the order to `PRICE_FINALIZED`.
+- `integration/test_order_state_machine.py` (Phase 8) — the state
+  machine against real PostgreSQL: a legal transition updates status
+  and records a correctly-attributed history row, an illegal one raises
+  `BusinessRuleException`, `COMPLETED -> DRAFT` specifically is
+  rejected, a customer can submit and cancel their own order, a
+  customer is rejected with `ForbiddenException` (not just silently
+  ignored) attempting a staff-only transition, a non-owner non-staff
+  caller gets `NotFoundException`, staff can transition any order
+  regardless of ownership, and — mirroring Phase 7's
+  `test_availability_concurrency.py` exactly — a dedicated concurrency
+  test bypassing the shared savepoint fixture fires 8 simultaneous
+  attempts to cancel the same order: exactly one succeeds, and the
+  order ends with exactly one `to_status=CANCELLED` history row no
+  matter how the 8 attempts actually interleaved.
 
 ## 9. Current status (keep this section accurate)
 
@@ -1287,35 +1477,103 @@ established.
 | `core/models` — operational user domain | Implemented (Phase 4): `CustomerProfile`, `PartnerProfile`/`PartnerStatus`, `Address`/`AddressLabel`, `ServiceArea`, `ServiceAreaPostalCode` |
 | `core/models` — catalog | Implemented (Phase 5): `Service`, `Material`, `ServiceMaterial` (+ `care_adjustment` since Phase 6), `PartnerCapability` |
 | `core/models` — pricing | Implemented (Phase 6): `PricingRule`/`PricingModel`, `MaterialPricingRule` |
-| `core/models` — availability/slots | Implemented (Phase 7): `OperatingHours`/`DayOfWeek`, `PartnerAvailability`, `CapacityUnit`, `PickupSlot`, `DeliverySlot`, `PickupSlotReservation`/`ReservationStatus`, `DeliverySlotReservation` — **no other domain models yet** (orders, payments, ... are later phases) |
+| `core/models` — availability/slots | Implemented (Phase 7): `OperatingHours`/`DayOfWeek`, `PartnerAvailability`, `CapacityUnit`, `PickupSlot`, `DeliverySlot`, `PickupSlotReservation`/`ReservationStatus`, `DeliverySlotReservation` |
+| `core/models` — orders | Implemented (Phase 8): `Order`/`OrderStatus`, `OrderItem`, `OrderStatusHistory` — **no payments model yet** (Phase 10) |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
-| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 8 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 21 tables exist, 4 roles seeded, full `pytest` suite (265 tests) passes with 0 skips against it |
-| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, and most of `availability` require `ADMIN` (booking/cancelling your own reservation only needs authentication) |
-| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service` |
-| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo` |
-| `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission` — wired since Phase 4 |
-| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 11 tags + response-envelope description) |
+| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 9 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity → orders). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 24 tables exist, 4 roles seeded, full `pytest` suite (300 tests) passes with 0 skips against it |
+| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability`, `orders` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, most of `availability`, and two `orders` operations require `ADMIN` (or, for orders, any of `ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER`) |
+| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service`, `order_service`, `order_state_service` |
+| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo`, `order_repo`, `order_item_repo`, `order_status_history_repo` |
+| `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission`, `require_any_role` (Phase 8) — wired since Phase 4 |
+| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 12 tags + response-envelope description) |
 | `washy_washy/utils` | Empty scaffold |
 | Auth (`/auth/register\|login\|refresh`, JWT issuance/verification) | Implemented (Phase 2) |
-| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), enforced on `service-areas`/`roles`/`catalog`/`pricing`/`availability` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
+| RBAC runtime (`require_role`/`require_permission`/`require_any_role`) | Implemented (Phase 3, extended Phase 8), enforced on `service-areas`/`roles`/`catalog`/`pricing`/`availability`/`orders` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
 | Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — an admin cannot revoke their own `ADMIN` role |
 | Catalog (`Service`/`Material`/compatibility/`PartnerCapability`) | Implemented (Phase 5) — `PartnerCapability` has a service layer but no API endpoint yet |
-| Pricing (`PricingRule`/`MaterialPricingRule`/`calculate_price`) | Implemented (Phase 6) — no order to snapshot a computed price onto yet (Phase 8) |
+| Pricing (`PricingRule`/`MaterialPricingRule`/`calculate_price`) | Implemented (Phase 6) — now snapshotted onto `OrderItem` (Phase 8) |
 | Availability (operating hours, partner availability, pickup/delivery slots + race-free capacity reservation) | Implemented (Phase 7) — `has_capable_partner` exists but is a global, unenforced check, not scoped to a service area (see §6j's documented scope gap; real enforcement needs Phase 9's partner↔area link) |
-| Orders / Payments | Not started |
+| Orders (`Order`/`OrderItem`/`OrderStatusHistory`, 24-state machine, concurrency-safe transitions) | Implemented (Phase 8) — no partner-to-order assignment yet (Phase 9), no real payment gateway behind `PENDING_PAYMENT -> CONFIRMED` (Phase 10), no delivery-slot scheduling workflow (columns exist, unpopulated) |
+| Payments | Not started |
 | Redis / Celery / APISIX | Not introduced |
-| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 6's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
+| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 8's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
 
 Roadmap (see `README.md` for the full phase list): Phase 0 (foundation) →
 Phase 1A–1D (database + identity/RBAC models) → Phase 2 Authentication →
 Phase 3 RBAC runtime → Phase 4: Users/Profiles/Addresses/Service Areas →
 admin role management addendum → Phase 5: Catalog → Phase 6: Pricing
-Engine → **(this update) Phase 7: Availability / Slots / Capacity** →
-Phase 8 Orders → ... → Phase 14 Production/AWS.
+Engine → Phase 7: Availability / Slots / Capacity →
+**(this update) Phase 8: Orders / State Machine** → Phase 9 Partner
+Operations → ... → Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-27 (latest)** — Phase 7, Availability / Slots / Capacity:
+- **2026-09-27 (latest)** — Phase 8, Orders / State Machine:
+  - Added `core/models/{order,order_item,order_status_history}.py`
+    (`Order`/`OrderStatus`, `OrderItem`, `OrderStatusHistory`), all
+    registered in `core/models/__init__.py`.
+  - Added Alembic revision `964739b60e1b` (head) — `orders`,
+    `order_items` (with two explicitly-named FKs to
+    `material_pricing_rules` to stay under PostgreSQL's 63-byte
+    identifier limit), `order_status_history`. Run against live
+    PostgreSQL; `downgrade`/`upgrade` round-trip verified.
+  - Added `washy_washy/repositories/{order,order_item,
+    order_status_history}_repo.py` (`OrderRepository.try_transition` is
+    the atomic conditional-`UPDATE` concurrency mechanism — see §6k),
+    `washy_washy/services/{order_state_service,order_service}.py`,
+    `washy_washy/schemas/orders.py`,
+    `washy_washy/api/v1/{routes,controllers}/orders.py` — `POST/GET
+    /orders`, `GET /orders/{id}`, `GET /orders/{id}/history`, `POST
+    /orders/{id}/{transition,schedule-pickup,finalize-price}`, `POST
+    /orders/{id}/items/{item_id}/itemize`. Added
+    `RBACService.has_any_role`/`dependencies/rbac.py::require_any_role`
+    (a `require_role` variant for "any of several roles"). Added
+    `ADDRESS_NOT_SERVICEABLE`/`ORDER_ITEMS_REQUIRED`/
+    `INVALID_ORDER_STATE_TRANSITION`/`ORDER_STATE_CONFLICT` to
+    `error_{codes,messages}.py`; added an `orders` tag to
+    `docs/openapi.py`.
+  - **Design decisions** (see §6k for full rationale): `Order`'s FKs
+    split ownership (`customer_id`, `CASCADE`) from reference
+    (everything else, no `ondelete`/`RESTRICT`) rather than cascading
+    everything, since an order is this project's first genuinely
+    significant business record; `OrderItem` keeps declared vs.
+    verified fields and estimated vs. final pricing snapshots genuinely
+    separate, never overwriting one with the other;
+    `OrderStatusHistory.changed_by_user_id` is `ON DELETE SET NULL`
+    (the one user-owned FK in this project that doesn't cascade — an
+    audit trail should survive the actor's deletion); the transition
+    graph and its customer-vs-staff authorization split live centrally
+    in `order_state_service.py`, never duplicated at the route layer;
+    order creation derives its `service_area_id` from the pickup
+    address rather than trusting a caller-supplied one.
+  - Added `tests/unit/test_phase8_models.py`,
+    `tests/integration/test_orders.py`, and
+    `tests/integration/test_order_state_machine.py` — the latter's
+    concurrency test deliberately targets 8 simultaneous attempts at
+    the *same* transition (cancelling one order), not two different
+    targets, since two different-but-mutually-reachable targets can
+    legitimately both succeed in sequence and wouldn't actually prove
+    anything about the race.
+  - **Not implemented, by design**: no partner-to-order assignment
+    (Phase 9), no real payment gateway behind `PENDING_PAYMENT ->
+    CONFIRMED` (Phase 10 — currently a plain staff-triggered flip), no
+    delivery-slot scheduling workflow (columns exist, unpopulated).
+  - **Verification**: `ruff check .`/`ruff format --check .` clean;
+    `pytest` — **300 passed, 0 failed** against live PostgreSQL (up
+    from 265). Migration round-trip run for real; every new
+    constraint's name length checked against the 63-byte limit before
+    finalizing (two required an explicit override). Live `uvicorn`
+    smoke test: registered an admin and a customer, granted `ADMIN` via
+    direct SQL, created a service area/service/material/pricing rule
+    and a serviceable address, placed an order (`estimated_total`
+    computed correctly), had the customer self-submit
+    `DRAFT -> PENDING_PAYMENT`, confirmed a customer gets `403`
+    attempting the staff-only `PENDING_PAYMENT -> CONFIRMED`, confirmed
+    an admin can perform it, confirmed an illegal jump
+    (`CONFIRMED -> PROCESSING`) is rejected with `422
+    INVALID_ORDER_STATE_TRANSITION`, and confirmed the resulting history
+    trail is complete and correctly attributed.
+- **2026-09-27** — Phase 7, Availability / Slots / Capacity:
   - Added `core/models/{operating_hours,partner_availability,
     capacity_unit,pickup_slot,delivery_slot,pickup_slot_reservation,
     delivery_slot_reservation}.py` (`DayOfWeek`, `OperatingHours`,
