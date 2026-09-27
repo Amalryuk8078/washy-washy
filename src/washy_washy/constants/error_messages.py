@@ -40,3 +40,7 @@ NO_ACTIVE_PRICING_RULE = "This service has no active pricing rule."
 QUANTITY_REQUIRED = "A quantity is required for this service's pricing model."
 WEIGHT_REQUIRED = "A weight (kg) is required for this service's pricing model."
 UNKNOWN_PRICING_MODEL = "This service's pricing model is not recognized."
+
+# Availability / slots / capacity (Phase 7)
+SLOT_CAPACITY_EXCEEDED = "This slot does not have enough remaining capacity."
+RESERVATION_NOT_ACTIVE = "This reservation is not active."

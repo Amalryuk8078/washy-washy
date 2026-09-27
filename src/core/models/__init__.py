@@ -9,13 +9,20 @@ as they're introduced.
 
 from core.models.address import Address, AddressLabel
 from core.models.base import Base
+from core.models.capacity_unit import CapacityUnit
 from core.models.customer_profile import CustomerProfile
+from core.models.delivery_slot import DeliverySlot
+from core.models.delivery_slot_reservation import DeliverySlotReservation
 from core.models.material import Material
 from core.models.material_pricing_rule import MaterialPricingRule
 from core.models.mixins import CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from core.models.operating_hours import DayOfWeek, OperatingHours
+from core.models.partner_availability import PartnerAvailability
 from core.models.partner_capability import PartnerCapability
 from core.models.partner_profile import PartnerProfile, PartnerStatus
 from core.models.permission import Permission, PermissionScope
+from core.models.pickup_slot import PickupSlot
+from core.models.pickup_slot_reservation import PickupSlotReservation, ReservationStatus
 from core.models.pricing_rule import PricingModel, PricingRule
 from core.models.role import Role, RoleName
 from core.models.role_permission import RolePermission
@@ -52,4 +59,13 @@ __all__ = [
     "PricingRule",
     "PricingModel",
     "MaterialPricingRule",
+    "DayOfWeek",
+    "OperatingHours",
+    "PartnerAvailability",
+    "CapacityUnit",
+    "PickupSlot",
+    "DeliverySlot",
+    "ReservationStatus",
+    "PickupSlotReservation",
+    "DeliverySlotReservation",
 ]

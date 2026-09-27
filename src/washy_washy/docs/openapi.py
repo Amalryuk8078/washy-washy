@@ -55,6 +55,12 @@ TAGS_METADATA: list[dict[str, Any]] = [
         "requires the `ADMIN` role.",
     },
     {
+        "name": "availability",
+        "description": "Operating hours, partner availability, and pickup/delivery slot "
+        "booking. Booking/cancelling your own reservation is open to any authenticated "
+        "caller; defining hours/availability/slots requires the `ADMIN` role.",
+    },
+    {
         "name": "roles",
         "description": "Admin-only role management — granting/revoking roles on other users. "
         "Every operation here requires the `ADMIN` role.",

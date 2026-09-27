@@ -13,6 +13,11 @@ class PartnerCapabilityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def has_any_capability_for_service(self, service_id: uuid.UUID) -> bool:
+        stmt = select(PartnerCapability.id).where(PartnerCapability.service_id == service_id)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
     async def has_capability(self, partner_profile_id: uuid.UUID, service_id: uuid.UUID) -> bool:
         stmt = select(PartnerCapability.id).where(
             PartnerCapability.partner_profile_id == partner_profile_id,

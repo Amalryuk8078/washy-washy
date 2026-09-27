@@ -1,17 +1,18 @@
 # Washy Washy Backend
 
 FastAPI backend foundation for **Washy Washy**, a laundry-service platform.
-This repository is currently at **Phase 6 — Pricing Engine**, built on
-Phase 0–5 (HTTP skeleton, auth, RBAC, users/profiles/addresses/service
-areas, and the catalog). Phase 6 adds backend-authoritative,
-**versioned** pricing (`PricingRule` per service, `MaterialPricingRule`
-per material — a price change opens a new version and closes the old
-one, never rewriting it) and `PricingService.calculate_price`, which
-returns an explicit breakdown (base, material/care adjustments,
-quantity charge, rush, delivery, tax, discount, subtotal, total) —
-never just a total. An admin role-management API (`/roles`,
-`/users/{id}/roles`) was added as a small addendum between Phase 4 and
-5, closing a gap those phases explicitly deferred. See the Roadmap.
+This repository is currently at **Phase 7 — Availability / Slots /
+Capacity**, built on Phase 0–6 (HTTP skeleton, auth, RBAC, users/
+profiles/addresses/service areas, catalog, pricing). Phase 7 adds
+operating hours, partner availability, and pickup/delivery slot
+booking with **race-free capacity reservation**: `PickupSlot`/
+`DeliverySlot` each track `capacity_total`/`capacity_reserved`, guarded
+by a single atomic conditional `UPDATE` (no `SELECT FOR UPDATE`, no
+Redis) so concurrent booking requests can never overbook a slot — this
+is verified under real concurrent load, not just sequential-logic
+tests. An admin role-management API (`/roles`, `/users/{id}/roles`) was
+added as a small addendum between Phase 4 and 5, closing a gap those
+phases explicitly deferred. See the Roadmap.
 
 ## Overview
 
@@ -79,37 +80,47 @@ washy-washy-backend/
 │   │   ├── database/        # Base (+ naming convention), async engine/session
 │   │   ├── models/          # mixins.py + User, Role, Permission, UserRole,
 │   │   │                    # RolePermission, CustomerProfile, PartnerProfile,
-│   │   │                    # Address, ServiceArea, ServiceAreaPostalCode
+│   │   │                    # Address, ServiceArea, ServiceAreaPostalCode,
+│   │   │                    # Service, Material, ServiceMaterial,
+│   │   │                    # PartnerCapability, PricingRule,
+│   │   │                    # MaterialPricingRule, OperatingHours,
+│   │   │                    # PartnerAvailability, PickupSlot, DeliverySlot,
+│   │   │                    # PickupSlotReservation, DeliverySlotReservation
 │   │   ├── security/        # password hashing, JWT encode/decode
 │   │   ├── dependencies/    # get_db_session
 │   │   ├── logging/         # structured logging setup
 │   │   ├── middleware/      # request-id correlation middleware
 │   │   ├── exceptions/      # AppException family + FastAPI handlers
-│   │   └── migrations/      # Alembic env.py, versions/ (7 revisions so far)
+│   │   └── migrations/      # Alembic env.py, versions/ (8 revisions so far)
 │   │
 │   └── washy_washy/
 │       ├── main.py          # FastAPI app construction
 │       ├── __main__.py      # `python -m washy_washy`
 │       ├── config.py        # service-level Settings(CoreSettings)
 │       ├── api/v1/routes/   # health, auth, users, customers, addresses,
-│       │                    # service_areas, roles, catalog, pricing
+│       │                    # service_areas, roles, catalog, pricing,
+│       │                    # availability
 │       ├── api/v1/controllers/  # same set
 │       ├── dependencies/    # auth.py: get_current_user
 │       │                    # rbac.py: require_role, require_permission
 │       ├── constants/       # error codes / messages (AUTH_*, profile/
-│       │                    # service-area/role/catalog/pricing conflict codes)
+│       │                    # service-area/role/catalog/pricing/
+│       │                    # availability conflict codes)
 │       ├── schemas/         # common, auth, profile, address, service_area,
-│       │                    # role, catalog, pricing
+│       │                    # role, catalog, pricing, availability
 │       ├── repositories/    # user, role, permission, user_role,
 │       │                    # role_permission, customer_profile,
 │       │                    # partner_profile, address, service_area,
 │       │                    # service, material, service_material,
 │       │                    # partner_capability, pricing_rule,
-│       │                    # material_pricing_rule
+│       │                    # material_pricing_rule, operating_hours,
+│       │                    # partner_availability, pickup_slot,
+│       │                    # delivery_slot, pickup_slot_reservation,
+│       │                    # delivery_slot_reservation
 │       ├── services/        # auth_service, rbac_service, profile_service,
 │       │                    # address_service, service_area_service,
 │       │                    # catalog_service, partner_capability_service,
-│       │                    # pricing_service
+│       │                    # pricing_service, availability_service
 │       ├── docs/            # openapi.py (tags + custom_openapi),
 │       │                    # swagger_ui.py (branded /docs, /redoc)
 │       ├── static/          # swagger-custom.css, favicon.svg
@@ -121,11 +132,15 @@ washy-washy-backend/
     ├── test_import.py
     ├── unit/                # test_database_foundation, test_alembic_wiring,
     │                        # test_rbac_models, test_auth_tokens_and_schemas,
-    │                        # test_phase4_models (no DB required)
+    │                        # test_phase4_models, test_phase5_models,
+    │                        # test_phase6_models, test_phase7_models
+    │                        # (no DB required)
     ├── integration/         # test_database_connection, test_user_identity,
     │                        # test_rbac_associations, test_auth,
     │                        # test_rbac_runtime, test_profiles,
-    │                        # test_addresses, test_service_areas
+    │                        # test_addresses, test_service_areas,
+    │                        # test_catalog, test_pricing, test_availability,
+    │                        # test_availability_concurrency
     │                        # (require a live, migrated DB)
     └── api/                 # test_auth_routes, test_protected_routes_require_auth
                               # (HTTP-level, validation-only, no DB)
@@ -304,6 +319,7 @@ A future model looks like:
 ```python
 from core.database.base import Base
 from core.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
@@ -696,6 +712,68 @@ component (`PriceBreakdown`), never just the total.
   `OrderItem` exist — `PriceBreakdown` already carries the rule ids a
   snapshot would need.
 
+## Availability / Slots / Capacity (Phase 7)
+
+```text
+GET/POST /api/v1/service-areas/{id}/operating-hours    -> per-day open/close time (ADMIN writes)
+GET/POST /api/v1/partners/{id}/availability             -> per-day partner hours (ADMIN writes)
+GET/POST /api/v1/service-areas/{id}/pickup-slots         -> dated capacity slots (ADMIN writes)
+GET/POST /api/v1/service-areas/{id}/delivery-slots       -> same, separate table
+POST     /api/v1/pickup-slots/{id}/reservations          -> book (any authenticated caller)
+DELETE   /api/v1/pickup-slots/reservations/{id}          -> cancel own reservation
+POST     /api/v1/delivery-slots/{id}/reservations        -> book
+DELETE   /api/v1/delivery-slots/reservations/{id}        -> cancel own reservation
+```
+
+- **`OperatingHours`/`PartnerAvailability`** — one row per
+  `(service_area_id | partner_profile_id, day_of_week)`, edited in place
+  (not versioned — a wrong closing time isn't worth keeping history of,
+  unlike a `PricingRule`). `close_day` sets `is_active = false` rather
+  than deleting the row.
+- **`PickupSlot`/`DeliverySlot`** — deliberately two separate tables,
+  not one table with a direction flag. Each carries `capacity_total`/
+  `capacity_reserved` (`Numeric(10,2)`) plus two `CHECK` constraints
+  (`capacity_reserved <= capacity_total`, `>= 0`) as a last-resort
+  database guard.
+- **Race-free capacity reservation is the core mechanism of this
+  phase**: `try_reserve_capacity` does the availability check and the
+  increment in one atomic conditional `UPDATE`:
+  ```sql
+  UPDATE pickup_slots
+  SET capacity_reserved = capacity_reserved + :amount
+  WHERE id = :slot_id
+    AND is_active = true
+    AND capacity_reserved + :amount <= capacity_total
+  ```
+  If no row matches (already full, or a concurrent request got there
+  first), the affected-row count is `0` and the booking is rejected with
+  `422 SLOT_CAPACITY_EXCEEDED` — there is no read-then-write window for
+  two concurrent requests to race past a stale check. **Verified under
+  genuine concurrency**, not just sequential-logic assertions:
+  `tests/integration/test_availability_concurrency.py` fires 10 truly
+  concurrent booking attempts (separate database connections +
+  `asyncio.gather`) against a slot with room for exactly 3 — exactly 3
+  succeed, and `capacity_reserved` never exceeds `capacity_total`.
+- **Cancellation** releases capacity via the mirrored `release_capacity`
+  and is idempotent — cancelling an already-cancelled reservation is a
+  silent no-op, so it can never double-free capacity.
+- **Ownership** on cancel follows `AddressService`'s posture: a
+  reservation belonging to someone else raises `404 NotFoundException`,
+  never `403` — a caller can't learn whether an ID they don't own
+  exists.
+- **Reservations deliberately carry no `partner_profile_id`/`order_id`**
+  — a reservation is against the slot's capacity, not a specific
+  partner (partner assignment is Phase 9) or order (`Order` doesn't
+  exist until Phase 8).
+- **Known, documented scope gap**: `has_capable_partner(service_id)`
+  checks only whether *any* partner anywhere holds a service's
+  capability — it is not scoped to the service area being booked, and
+  it is **not enforced** inside the booking flow. A correctly
+  area-scoped check needs a `PartnerProfile <-> ServiceArea`
+  association that doesn't exist yet (that link belongs to Phase 9).
+  Documented in `availability_service.py`'s module docstring rather than
+  silently glossed over.
+
 ## Database setup / Alembic
 
 Migrations are owned by `core` (models live in `core/models/`); the
@@ -726,20 +804,24 @@ db9e1e1a26b8  seed foundational roles                (idempotent data seed)
 368d5df746fb  create catalog tables                   (services, materials, service_materials,
                                                         partner_capabilities)
 f04acb897ec2  create pricing tables + care_adjustment (pricing_rules, material_pricing_rules,
-                                                        service_materials.care_adjustment, head)
+                                                        service_materials.care_adjustment)
+01a11e11a45d  create availability, slots, and capacity (operating_hours, partner_availabilities,
+                                                        pickup_slots, delivery_slots,
+                                                        pickup_slot_reservations,
+                                                        delivery_slot_reservations, head)
 ```
 
-All seven were hand-written to match the models exactly (reviewed rather
+All eight were hand-written to match the models exactly (reviewed rather
 than a raw `--autogenerate` dump, per the project's migration-safety
 rule). `alembic upgrade head` has been run end-to-end against a real
 PostgreSQL instance (both a local install and, separately, the
 `docker-compose` `postgres` container) — schema, seeded roles, and every
-Phase 4 table/index/constraint verified by querying the database
-directly, plus the full `pytest` suite (163 tests) passing with zero
-skips against it. The two newest revisions' full `upgrade`/`downgrade`/
-`upgrade` round-trip was also run and verified (all 5 Phase 4 tables
-dropped cleanly on downgrade, recreated identically on re-upgrade) — see
-"Running tests" below.
+table/index/constraint verified by querying the database directly, plus
+the full `pytest` suite (265 tests) passing with zero skips against it.
+The newest revision's full `upgrade`/`downgrade`/`upgrade` round-trip
+was also run and verified (all 6 Phase 7 tables dropped cleanly on
+downgrade, recreated identically on re-upgrade) — see "Running tests"
+below.
 
 ## API documentation (Swagger / ReDoc)
 
@@ -791,10 +873,13 @@ Docker" above, then `alembic upgrade head`) and **skips itself cleanly**
 (does not fail) when one isn't reachable, or when the tables haven't been
 migrated yet — so `pytest` alone is always self-contained whether or not
 a database is up. Each integration test runs inside its own transaction
-that's rolled back on teardown, so they never leave rows behind. Verified
-end-to-end against a real PostgreSQL instance: **235 passed, 0 skipped,
-0 failed** (up from 209 as of Phase 5) — reproducibly, from a cold shell
-with nothing pre-exported.
+that's rolled back on teardown, so they never leave rows behind — except
+`test_availability_concurrency.py`, which deliberately uses independent
+database connections (a genuine race needs separate connections, not one
+connection's savepoints) and cleans up manually in a `finally` block.
+Verified end-to-end against a real PostgreSQL instance: **265 passed, 0
+skipped, 0 failed** (up from 235 as of Phase 6) — reproducibly, from a
+cold shell with nothing pre-exported.
 (`tests/conftest.py`'s `DATABASE_URL`/`JWT_SECRET` fallback only applies
 when no `.env` exists — it used to apply unconditionally via
 `os.environ.setdefault`, which shadowed a real `.env`'s password and
@@ -859,8 +944,8 @@ Phase 2   Authentication (register/login/refresh, JWT, get_current_user)
 Phase 3   RBAC runtime (require_role/require_permission)
 Phase 4   Users / Profiles / Addresses / Service Areas
 Phase 5   Catalog + Services + Materials
-Phase 6   Pricing Engine                                                ← you are here
-Phase 7   Availability + Slots + Capacity
+Phase 6   Pricing Engine
+Phase 7   Availability + Slots + Capacity                               ← you are here
 Phase 8   Orders + State Machine
 Phase 9   Partner Operations
 Phase 10  Payments + Invoices + Refunds
@@ -870,10 +955,8 @@ Phase 13  Flutter Integration
 Phase 14  Production / AWS
 ```
 
-Phase 6 deliberately stops at pricing: no availability/slot capacity
-(Phase 7), no `Order`/`OrderItem` to snapshot a computed price onto
-(Phase 8) — `PriceBreakdown` carries the rule ids a future snapshot
-would need, but nothing persists one yet — and no tax/rush/delivery
-*policy* tables (those remain caller-supplied inputs; a real policy
-store is deferred until an actual need shows up, likely Phase 10).
-Orders/payments are not started.
+Phase 7 deliberately stops at availability: no partner-to-area or
+partner-to-order assignment (Phase 9), no `Order` to attach a booking to
+(Phase 8), and `has_capable_partner` exists but is a known, documented,
+unenforced global check rather than a (currently impossible)
+area-scoped one. Orders/payments are not started.

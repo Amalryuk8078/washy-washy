@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from washy_washy.api.v1.routes import (
     addresses,
     auth,
+    availability,
     catalog,
     customers,
     health,
@@ -22,5 +23,6 @@ api_v1_router.include_router(service_areas.router)
 api_v1_router.include_router(roles.router)
 api_v1_router.include_router(catalog.router)
 api_v1_router.include_router(pricing.router)
+api_v1_router.include_router(availability.router)
 
 __all__ = ["api_v1_router"]

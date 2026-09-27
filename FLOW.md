@@ -9,21 +9,21 @@
 ## 1. What this is
 
 FastAPI backend for **Washy Washy**, a laundry-service platform. Single
-**modular monolith** (not microservices). Currently at **Phase 6 —
-Pricing Engine**, built on Phase 0–5 (HTTP skeleton, auth, RBAC, users/
-profiles/addresses/service areas, catalog). Phase 6 adds
-backend-authoritative, versioned pricing: `PricingRule` (per service),
-`MaterialPricingRule` (per material) — each row *is* a version, a rate
-change opens a new one and closes the old rather than rewriting it —
-and `PricingService.calculate_price`, returning an explicit
-`PriceBreakdown` (never just a total). Rush/delivery/tax/discount are
-caller-supplied inputs, not stored policy. An admin role-management API
-was added as a small addendum between Phase 4 and 5, closing a gap
-those phases explicitly deferred. This environment's database/
-migrations/Docker have all been verified end-to-end against a real
-PostgreSQL (235/235 tests passing) and `/docs`/`/redoc` carry Washy
-Washy branding — see §6e–§6i and the changelog. Orders/payments are not
-yet implemented.
+**modular monolith** (not microservices). Currently at **Phase 7 —
+Availability / Slots / Capacity**, built on Phase 0–6 (HTTP skeleton,
+auth, RBAC, users/profiles/addresses/service areas, catalog, pricing).
+Phase 7 adds operating hours, partner availability, and pickup/delivery
+slot booking with race-free capacity reservation: `PickupSlot`/
+`DeliverySlot` each carry a `capacity_total`/`capacity_reserved` pair
+guarded by an atomic conditional `UPDATE` (no `SELECT FOR UPDATE`, no
+Redis) so concurrent bookings can never overbook a slot, and
+`PickupSlotReservation`/`DeliverySlotReservation` record who booked
+how much. An admin role-management API was added as a small addendum
+between Phase 4 and 5, closing a gap those phases explicitly deferred.
+This environment's database/migrations/Docker have all been verified
+end-to-end against a real PostgreSQL (265/265 tests passing) and
+`/docs`/`/redoc` carry Washy Washy branding — see §6e–§6j and the
+changelog. Orders/payments are not yet implemented.
 
 Target system context (only FastAPI + PostgreSQL exist today; the rest are
 future phases):
@@ -215,6 +215,7 @@ The reusable foundation every domain model builds on:
   ```python
   from core.database.base import Base
   from core.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+
 
   class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
       __tablename__ = "users"
@@ -745,6 +746,106 @@ POST /pricing/estimate
   that would accumulate floating-point error (`0.10 + 0.20*3`) if this
   slipped to `float` anywhere in the chain.
 
+### 6j. Availability / Slots / Capacity (`washy_washy/{services/availability_service,repositories/{operating_hours_repo,partner_availability_repo,pickup_slot_repo,delivery_slot_repo,pickup_slot_reservation_repo,delivery_slot_reservation_repo},api/v1/{routes,controllers}/availability,schemas/availability}.py`) — Phase 7
+
+```text
+GET/POST /service-areas/{id}/operating-hours    -> per-day opening/closing time (ADMIN writes)
+GET/POST /partners/{id}/availability             -> per-day partner working hours (ADMIN writes)
+GET/POST /service-areas/{id}/pickup-slots        -> dated capacity-bearing slots (ADMIN writes)
+GET/POST /service-areas/{id}/delivery-slots      -> same, separate table
+POST     /pickup-slots/{id}/reservations         -> book (any authenticated caller)
+DELETE   /pickup-slots/reservations/{id}         -> cancel own reservation (404 if not owner)
+POST     /delivery-slots/{id}/reservations       -> book
+DELETE   /delivery-slots/reservations/{id}        -> cancel own reservation
+```
+
+- **`OperatingHours`/`PartnerAvailability`** — one row per
+  `(service_area_id, day_of_week)` / `(partner_profile_id, day_of_week)`,
+  `UNIQUE` on that pair, `TimestampMixin` (hours get corrected in place,
+  not versioned — unlike `PricingRule`, a wrong closing time isn't
+  something worth keeping history of). `DayOfWeek` is a plain `StrEnum`
+  of the seven day names, not DB-enforced (same reasoning as `RoleName`
+  in §6b — a string column, not a Postgres enum type, so no migration is
+  needed if a new value scheme is ever needed). `AvailabilityService.
+  set_operating_hours`/`set_partner_availability` create-or-update in
+  place (one row per day, no history) — `close_day` sets `is_active =
+  false` rather than deleting the row, so the configured hours aren't
+  lost, just switched off.
+- **`PickupSlot`/`DeliverySlot`** — deliberately two separate tables,
+  not one table with a `direction`/`kind` discriminator column, per the
+  spec's explicit instruction. Each carries `capacity_unit` (a plain
+  string against `CapacityUnit`'s vocabulary — `ORDERS`/`WEIGHT_KG`/
+  `ITEMS`/`BAGS` — same "not DB-enforced" reasoning as `DayOfWeek`),
+  `capacity_total`, and `capacity_reserved` (`Numeric(10,2)`, defaults
+  `0`). Two `CHECK` constraints (`capacity_reserved <= capacity_total`,
+  `capacity_reserved >= 0`) are the last-resort database-level guard —
+  belt-and-suspenders under the application-level atomic `UPDATE` below,
+  not the primary mechanism. `UNIQUE (service_area_id, slot_date,
+  start_time, end_time)` prevents creating the same slot window twice.
+- **Race-free capacity reservation — the core mechanism of this phase**
+  (`PickupSlotRepository.try_reserve_capacity`/`DeliverySlotRepository.
+  try_reserve_capacity`):
+  ```python
+  stmt = (
+      update(PickupSlot)
+      .where(
+          PickupSlot.id == slot_id,
+          PickupSlot.is_active.is_(True),
+          PickupSlot.capacity_reserved + amount <= PickupSlot.capacity_total,
+      )
+      .values(capacity_reserved=PickupSlot.capacity_reserved + amount)
+  )
+  result = await self._session.execute(stmt)
+  return result.rowcount == 1
+  ```
+  The capacity check and the increment happen in the *same* statement,
+  evaluated atomically by PostgreSQL against the current row — there is
+  no read-then-write window for two concurrent requests to both pass a
+  Python-side check against a value that's since gone stale. If the
+  `WHERE` clause doesn't match (already full, or someone else's
+  concurrent `UPDATE` got there first), `rowcount` is `0` and
+  `AvailabilityService.book_pickup_slot`/`book_delivery_slot` raises
+  `BusinessRuleException`/`SLOT_CAPACITY_EXCEEDED` — no `SELECT FOR
+  UPDATE`, no advisory lock, no Redis-backed counter. **Verified under
+  real concurrency, not just sequential logic** —
+  `tests/integration/test_availability_concurrency.py` fires 10 truly
+  concurrent booking attempts (separate connections via independent
+  `session_factory()` calls + `asyncio.gather`, deliberately bypassing
+  the shared savepoint-based `db_session` fixture, since a genuine race
+  needs separate connections) against a slot with capacity for only 3;
+  exactly 3 succeed and `capacity_reserved` lands exactly on `3`, never
+  over.
+- **Cancellation releases capacity** via the mirrored unconditional
+  `release_capacity` (`UPDATE ... SET capacity_reserved =
+  capacity_reserved - amount`) and flips the reservation's `status` to
+  `CANCELLED`. **Idempotent** — cancelling an already-cancelled
+  reservation is a silent no-op (checked via `status == ACTIVE` before
+  touching capacity), so a duplicate cancel request can never double-free
+  capacity that was already released.
+- **Ownership enforced the same way as `AddressService`** (§6f): a
+  reservation that exists but belongs to a different customer raises
+  `NotFoundException`, not `ForbiddenException` — a caller can't learn
+  whether a reservation ID they don't own exists at all.
+- **`PickupSlotReservation`/`DeliverySlotReservation` deliberately have
+  no `partner_profile_id` and no `order_id` column.** A reservation is
+  against the *slot's* capacity, not a specific partner — assigning a
+  partner to fulfil a booking is Phase 9 (Partner Operations), and
+  `Order` doesn't exist until Phase 8, so there's nothing yet to link a
+  reservation to. Adding either column now would be speculative ahead of
+  those phases actually needing it.
+- **Known, documented scope gap**: `AvailabilityService.
+  has_capable_partner(service_id)` checks only whether *any* partner
+  anywhere holds the capability for a service (`PartnerCapabilityRepository.
+  has_any_capability_for_service`) — it is **not** scoped to the service
+  area being booked, and it is **not** enforced inside `book_pickup_slot`/
+  `book_delivery_slot`. A real "is a capable partner actually available
+  in this area for this slot" check needs a `PartnerProfile <->
+  ServiceArea` association that doesn't exist in the current schema —
+  adding it now would be speculative ahead of Phase 9, which is where
+  partner-to-area/partner-to-order assignment actually belongs. This
+  limitation is documented in `availability_service.py`'s own module
+  docstring, not silently glossed over.
+
 ### Migrations (`core/migrations/`, Alembic)
 - Owned by `core` since models live in `core/models/`. `washy_washy` has no
   migrations folder of its own.
@@ -783,14 +884,21 @@ POST /pricing/estimate
      `materials` (independent parents), then `service_materials`
      (references both) and `partner_capabilities` (references
      `services` and the existing `partner_profiles`).
-  7. `f04acb897ec2` (head) create pricing tables + care_adjustment —
+  7. `f04acb897ec2` create pricing tables + care_adjustment —
      `pricing_rules`, `material_pricing_rules` (both independent,
      versioned, partial-unique-indexed), plus `ALTER TABLE
      service_materials ADD COLUMN care_adjustment`.
+  8. `01a11e11a45d` (head) create availability, slots, and capacity
+     tables — `operating_hours`, `partner_availabilities` (both
+     independent, reference `service_areas`/`partner_profiles`
+     respectively), then `pickup_slots`/`delivery_slots` (each with its
+     two capacity `CHECK` constraints) and `pickup_slot_reservations`/
+     `delivery_slot_reservations` (reference their own slot table and
+     `users`).
   `alembic upgrade head` has been run against real PostgreSQL — both a
   local install and, separately, the `docker-compose` `postgres`
-  container — and verified: all 17 tables exist (`alembic_version` +
-  the 16 above) with the four `RoleName` roles seeded. Every multi-table
+  container — and verified: all 21 tables exist (`alembic_version` +
+  the 20 above) with the four `RoleName` roles seeded. Every multi-table
   revision's full `downgrade` → `upgrade head` round-trip has been run
   and verified at the time it was added (tables dropped cleanly,
   recreated identically) — see §9/§10.
@@ -1126,6 +1234,48 @@ established.
   even after a newer version supersedes it.
 - `api/test_protected_routes_require_auth.py` extended with
   `POST /pricing/estimate` (Phase 6).
+- `unit/test_phase7_models.py` (Phase 7) — no DB required: mapper
+  configuration succeeds, `DayOfWeek` has exactly the seven spec'd
+  names, `CapacityUnit` matches `ORDERS`/`WEIGHT_KG`/`ITEMS`/`BAGS`,
+  `OperatingHours`/`PartnerAvailability` are each uniquely constrained
+  on their `(parent_id, day_of_week)` pair, `PickupSlot`/`DeliverySlot`
+  (and their reservation tables) are genuinely separate classes/tables
+  — not one table with a discriminator, `PickupSlot` carries both named
+  `CHECK` constraints (`ck_pickup_slots_capacity_within_total`/
+  `ck_pickup_slots_capacity_reserved_non_negative` — the naming
+  convention's `ck_%(table_name)s_%(constraint_name)s` prefix applies
+  here same as everywhere else) and defaults `capacity_reserved` to
+  `Decimal("0")`, its four-column uniqueness constraint is present,
+  every slot-table FK is `ON DELETE CASCADE`, `ReservationStatus.ACTIVE`
+  is the status default, and `PickupSlotReservation` has neither a
+  `partner_profile_id` nor an `order_id` column (§6j's deliberate design
+  decision).
+- `integration/test_availability.py` (Phase 7) — `AvailabilityService`
+  against real PostgreSQL, sequential logic and business rules: set/get
+  operating hours, setting them twice updates the same row in place,
+  `is_open` true within hours and false outside/on an undefined day,
+  `close_day` overrides previously-set hours, partner availability
+  round-trip (`is_partner_available` true within hours, false outside
+  and on an unset day), `has_capable_partner` false before a grant and
+  true after, create/list pickup slots, pickup and delivery slots stay
+  independent (booking one never touches the other's capacity), booking
+  reserves capacity, booking past remaining capacity raises
+  `BusinessRuleException`, booking a nonexistent slot raises
+  `NotFoundException`, cancelling releases capacity, cancelling
+  someone else's reservation raises `NotFoundException` (ownership,
+  same posture as `AddressService`), cancelling twice is a no-op (no
+  double-release), and a full delivery-slot book+cancel round-trip.
+- `integration/test_availability_concurrency.py` (Phase 7) — the one
+  test in the suite that deliberately bypasses the shared savepoint
+  `db_session` fixture (a genuine race needs independent connections,
+  not one connection's savepoints): 10 truly concurrent booking
+  attempts via separate `session_factory()` sessions + `asyncio.gather`
+  against a slot with capacity for exactly 3 — exactly 3 succeed,
+  `capacity_reserved` lands exactly on `3`, proving the atomic
+  conditional `UPDATE` in `try_reserve_capacity` (§6j) actually prevents
+  overbooking under real concurrent load, not just in sequential-logic
+  tests. Uses real commits and manually cleans up everything it wrote
+  in a `finally` block, since nothing here is rolled back automatically.
 
 ## 9. Current status (keep this section accurate)
 
@@ -1136,20 +1286,22 @@ established.
 | `core/models` — identity/RBAC | Implemented: `User`, `Role`/`RoleName`, `Permission`/`PermissionScope`, `UserRole`, `RolePermission` |
 | `core/models` — operational user domain | Implemented (Phase 4): `CustomerProfile`, `PartnerProfile`/`PartnerStatus`, `Address`/`AddressLabel`, `ServiceArea`, `ServiceAreaPostalCode` |
 | `core/models` — catalog | Implemented (Phase 5): `Service`, `Material`, `ServiceMaterial` (+ `care_adjustment` since Phase 6), `PartnerCapability` |
-| `core/models` — pricing | Implemented (Phase 6): `PricingRule`/`PricingModel`, `MaterialPricingRule` — **no other domain models yet** (orders, payments, ... are later phases) |
+| `core/models` — pricing | Implemented (Phase 6): `PricingRule`/`PricingModel`, `MaterialPricingRule` |
+| `core/models` — availability/slots | Implemented (Phase 7): `OperatingHours`/`DayOfWeek`, `PartnerAvailability`, `CapacityUnit`, `PickupSlot`, `DeliverySlot`, `PickupSlotReservation`/`ReservationStatus`, `DeliverySlotReservation` — **no other domain models yet** (orders, payments, ... are later phases) |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
-| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 7 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 17 tables exist, 4 roles seeded, full `pytest` suite (235 tests) passes with 0 skips against it |
-| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, and `pricing` require `ADMIN` |
-| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service` |
-| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo` |
+| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 8 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 21 tables exist, 4 roles seeded, full `pytest` suite (265 tests) passes with 0 skips against it |
+| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, and most of `availability` require `ADMIN` (booking/cancelling your own reservation only needs authentication) |
+| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service` |
+| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo` |
 | `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission` — wired since Phase 4 |
-| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 10 tags + response-envelope description) |
+| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 11 tags + response-envelope description) |
 | `washy_washy/utils` | Empty scaffold |
 | Auth (`/auth/register\|login\|refresh`, JWT issuance/verification) | Implemented (Phase 2) |
-| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), enforced on `service-areas`/`roles`/`catalog`/`pricing` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
+| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), enforced on `service-areas`/`roles`/`catalog`/`pricing`/`availability` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
 | Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — an admin cannot revoke their own `ADMIN` role |
 | Catalog (`Service`/`Material`/compatibility/`PartnerCapability`) | Implemented (Phase 5) — `PartnerCapability` has a service layer but no API endpoint yet |
 | Pricing (`PricingRule`/`MaterialPricingRule`/`calculate_price`) | Implemented (Phase 6) — no order to snapshot a computed price onto yet (Phase 8) |
+| Availability (operating hours, partner availability, pickup/delivery slots + race-free capacity reservation) | Implemented (Phase 7) — `has_capable_partner` exists but is a global, unenforced check, not scoped to a service area (see §6j's documented scope gap; real enforcement needs Phase 9's partner↔area link) |
 | Orders / Payments | Not started |
 | Redis / Celery / APISIX | Not introduced |
 | Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 6's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
@@ -1157,13 +1309,74 @@ established.
 Roadmap (see `README.md` for the full phase list): Phase 0 (foundation) →
 Phase 1A–1D (database + identity/RBAC models) → Phase 2 Authentication →
 Phase 3 RBAC runtime → Phase 4: Users/Profiles/Addresses/Service Areas →
-admin role management addendum → Phase 5: Catalog →
-**(this update) Phase 6: Pricing Engine** → Phase 7 Availability → ... →
-Phase 14 Production/AWS.
+admin role management addendum → Phase 5: Catalog → Phase 6: Pricing
+Engine → **(this update) Phase 7: Availability / Slots / Capacity** →
+Phase 8 Orders → ... → Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-27 (latest)** — Phase 6, Pricing Engine:
+- **2026-09-27 (latest)** — Phase 7, Availability / Slots / Capacity:
+  - Added `core/models/{operating_hours,partner_availability,
+    capacity_unit,pickup_slot,delivery_slot,pickup_slot_reservation,
+    delivery_slot_reservation}.py` (`DayOfWeek`, `OperatingHours`,
+    `PartnerAvailability`, `CapacityUnit`, `PickupSlot`, `DeliverySlot`,
+    `ReservationStatus`, `PickupSlotReservation`,
+    `DeliverySlotReservation`), all registered in
+    `core/models/__init__.py`.
+  - Added Alembic revision `01a11e11a45d` (head) — `operating_hours`,
+    `partner_availabilities`, `pickup_slots`/`delivery_slots` (each with
+    two `CHECK` constraints), `pickup_slot_reservations`/
+    `delivery_slot_reservations`. Run against live PostgreSQL;
+    `downgrade`/`upgrade` round-trip verified (tables confirmed gone via
+    `\dt` after downgrade, back via `\d` after re-upgrade).
+  - Added `washy_washy/repositories/{operating_hours,
+    partner_availability,pickup_slot,delivery_slot,
+    pickup_slot_reservation,delivery_slot_reservation}_repo.py` (the
+    slot repos' `try_reserve_capacity`/`release_capacity` are the core
+    mechanism — see §6j), a new `has_any_capability_for_service` method
+    on the existing `partner_capability_repo.py`,
+    `washy_washy/services/availability_service.py`
+    (`AvailabilityService`), `washy_washy/schemas/availability.py`,
+    `washy_washy/api/v1/{routes,controllers}/availability.py` — `GET/POST
+    /service-areas/{id}/operating-hours`, `GET/POST
+    /partners/{id}/availability`, `GET/POST
+    /service-areas/{id}/{pickup,delivery}-slots`, `POST
+    /{pickup,delivery}-slots/{id}/reservations`, `DELETE
+    /{pickup,delivery}-slots/reservations/{id}`. Added
+    `SLOT_CAPACITY_EXCEEDED`/`RESERVATION_NOT_ACTIVE` to
+    `error_{codes,messages}.py`; added an `availability` tag to
+    `docs/openapi.py`.
+  - **Design decisions** (see §6j for full rationale): `PickupSlot`/
+    `DeliverySlot` are genuinely separate tables, not one table with a
+    discriminator column; capacity reservation is a single atomic
+    conditional `UPDATE` (check-and-increment in one statement), not
+    `SELECT FOR UPDATE` or a Redis-backed counter; reservations carry no
+    `partner_profile_id`/`order_id` (out of scope until Phase 8/9 exist);
+    ownership enforcement on cancel mirrors `AddressService`'s
+    404-not-403 posture; `has_capable_partner` is a known, documented,
+    *unenforced* scope gap (global, not area-scoped) rather than a
+    silently-wrong area-scoped check.
+  - Added `tests/unit/test_phase7_models.py`,
+    `tests/integration/test_availability.py`, and
+    `tests/integration/test_availability_concurrency.py` — the latter
+    proves, under 10 genuinely concurrent booking attempts across
+    independent database connections (not just sequential-logic
+    assertions), that the atomic `UPDATE` actually prevents overbooking:
+    exactly 3 of 10 attempts succeed against a slot with capacity for 3,
+    and `capacity_reserved` never exceeds `capacity_total`.
+  - **Not implemented, by design**: no partner-to-area or
+    partner-to-order assignment (Phase 9), no order to attach a booking
+    to (Phase 8), no enforcement of `has_capable_partner` inside the
+    booking flow.
+  - **Verification**: `ruff check .` and `ruff format --check .` clean;
+    `pytest` — **265 passed, 0 failed** against live PostgreSQL (up from
+    235). Migration round-trip run for real. Live `uvicorn` smoke test:
+    registered an admin and a customer, granted `ADMIN` via direct SQL,
+    confirmed a non-admin gets `403` creating a pickup slot, created one
+    as admin, booked it as the customer (`capacity_reserved` moved
+    `0` → `2`), cancelled it (`capacity_reserved` back to `0`), then
+    cleaned up all test data.
+- **2026-09-27** — Phase 6, Pricing Engine:
   - Added `core/models/{pricing_rule,material_pricing_rule}.py`
     (`PricingRule`/`PricingModel`, `MaterialPricingRule`), registered in
     `core/models/__init__.py`; added `care_adjustment` to
