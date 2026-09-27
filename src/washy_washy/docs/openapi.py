@@ -49,6 +49,12 @@ TAGS_METADATA: list[dict[str, Any]] = [
         "authenticated caller; writes require the `ADMIN` role.",
     },
     {
+        "name": "pricing",
+        "description": "Versioned per-service/material rates and price estimation. Reading a "
+        "rate and estimating a price are open to any authenticated caller; setting a rate "
+        "requires the `ADMIN` role.",
+    },
+    {
         "name": "roles",
         "description": "Admin-only role management — granting/revoking roles on other users. "
         "Every operation here requires the `ADMIN` role.",

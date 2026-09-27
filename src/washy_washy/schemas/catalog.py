@@ -4,6 +4,7 @@ materials, and their compatibility rows).
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -48,6 +49,7 @@ class SetCompatibilityRequest(BaseModel):
     material_id: uuid.UUID
     care_instructions: str | None = None
     max_temperature_celsius: int | None = None
+    care_adjustment: Decimal | None = None
 
 
 class ServiceMaterialResponse(BaseModel):
@@ -58,5 +60,6 @@ class ServiceMaterialResponse(BaseModel):
     material_id: uuid.UUID
     care_instructions: str | None
     max_temperature_celsius: int | None
+    care_adjustment: Decimal | None
     created_at: datetime
     updated_at: datetime

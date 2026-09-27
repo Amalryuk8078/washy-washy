@@ -34,3 +34,9 @@ SERVICE_NAME_ALREADY_EXISTS = "A service with this name already exists."
 MATERIAL_NAME_ALREADY_EXISTS = "A material with this name already exists."
 SERVICE_MATERIAL_ALREADY_EXISTS = "This service/material compatibility already exists."
 PARTNER_CAPABILITY_ALREADY_EXISTS = "This partner already has this capability."
+
+# Pricing (Phase 6)
+NO_ACTIVE_PRICING_RULE = "This service has no active pricing rule."
+QUANTITY_REQUIRED = "A quantity is required for this service's pricing model."
+WEIGHT_REQUIRED = "A weight (kg) is required for this service's pricing model."
+UNKNOWN_PRICING_MODEL = "This service's pricing model is not recognized."

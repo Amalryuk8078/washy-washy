@@ -9,20 +9,21 @@
 ## 1. What this is
 
 FastAPI backend for **Washy Washy**, a laundry-service platform. Single
-**modular monolith** (not microservices). Currently at **Phase 5 —
-Catalog / Services / Materials**, built on Phase 0 (HTTP skeleton),
-Phase 1 (database + identity/RBAC), Phase 2 (authentication), Phase 3
-(`require_role`/`require_permission`), and Phase 4 (users/profiles/
-addresses/service areas — the first protected endpoints). Phase 5 adds
-`Service`/`Material`/their compatibility and `PartnerCapability`
-(which services a partner can perform) — deliberately independent of
-pricing (Phase 6) and availability/capacity (Phase 7). An admin
-role-management API (`/roles`, `/users/{id}/roles`) was added as a
-small addendum between Phase 4 and 5, closing a gap those phases
-explicitly deferred. This environment's database/migrations/Docker have
-all been verified end-to-end against a real PostgreSQL (209/209 tests
-passing) and `/docs`/`/redoc` carry Washy Washy branding — see §6e–§6h
-and the changelog. Orders/payments are not yet implemented.
+**modular monolith** (not microservices). Currently at **Phase 6 —
+Pricing Engine**, built on Phase 0–5 (HTTP skeleton, auth, RBAC, users/
+profiles/addresses/service areas, catalog). Phase 6 adds
+backend-authoritative, versioned pricing: `PricingRule` (per service),
+`MaterialPricingRule` (per material) — each row *is* a version, a rate
+change opens a new one and closes the old rather than rewriting it —
+and `PricingService.calculate_price`, returning an explicit
+`PriceBreakdown` (never just a total). Rush/delivery/tax/discount are
+caller-supplied inputs, not stored policy. An admin role-management API
+was added as a small addendum between Phase 4 and 5, closing a gap
+those phases explicitly deferred. This environment's database/
+migrations/Docker have all been verified end-to-end against a real
+PostgreSQL (235/235 tests passing) and `/docs`/`/redoc` carry Washy
+Washy branding — see §6e–§6i and the changelog. Orders/payments are not
+yet implemented.
 
 Target system context (only FastAPI + PostgreSQL exist today; the rest are
 future phases):
@@ -690,6 +691,60 @@ require `require_role(RoleName.ADMIN.value)` — same router-level
   `partner_service_capabilities`, would have produced a 63-byte unique
   constraint name, uncomfortably exactly at the limit.
 
+### 6i. Pricing (`washy_washy/{services/pricing_service,repositories/{pricing_rule_repo,material_pricing_rule_repo},api/v1/{routes,controllers}/pricing,schemas/pricing}.py`) — Phase 6
+
+```text
+POST /pricing/estimate
+  → PricingService.calculate_price(service_id, material_id, quantity|weight_kg|custom_charge, rush, delivery, tax, discount)
+      → get_active_service_pricing(service_id)      [404 NO_ACTIVE_PRICING_RULE if none]
+      → material_pricing_rules.get_active_for_material(material_id)  [None → adjustment 0]
+      → service_materials.get(service_id, material_id)               [None → care_adjustment 0]
+      → _compute_quantity_charge(pricing_rule, ...)   [dispatches on pricing_model]
+  ← PriceBreakdown  (base, material_adjustment, care_adjustment, quantity_charge,
+                      rush_charge, delivery_charge, tax, discount, subtotal, total,
+                      pricing_rule_id, material_pricing_rule_id)
+```
+
+- **`PricingRule`/`MaterialPricingRule`** — each row *is* a version (no
+  separate `*_version` table): `set_service_pricing`/
+  `set_material_pricing` close the current active row
+  (`effective_to = now()`) then insert a new one, in two separate
+  flushes — same reasoning as `AddressService.set_default_address`
+  (Phase 4): the two rows must never both be "active" mid-flush, which
+  the partial unique index (`WHERE effective_to IS NULL`, one per
+  service/material) would reject even within one transaction. A rate
+  change therefore never rewrites an existing row — the old row's
+  `base_price`/`unit_price` stay exactly what they were, forever.
+- **`PricingModel`** dispatch: `PER_ITEM`/`PER_BAG` need `quantity`;
+  `PER_KG`/`BASE_PLUS_WEIGHT` need `weight_kg`; `CUSTOM` uses
+  `custom_charge` (defaulting to zero if omitted). Passing the wrong
+  input for the active model raises `BusinessRuleException`
+  (`QUANTITY_REQUIRED`/`WEIGHT_REQUIRED`) rather than silently
+  producing a zero charge.
+- **Rush charge, delivery charge, tax, and discount are parameters to
+  `calculate_price`, not stored catalog rates** — matching the Phase 6
+  spec's own framing of these as *inputs* to the pricing service. No
+  "global tax rate"/policy table exists; that's deferred until a real
+  need appears (plausibly Phase 10, payments/invoices).
+- **`ServiceMaterial.care_adjustment`** (new nullable column, Phase 5's
+  table) is deliberately *not* independently versioned like the two
+  rules above — it's a smaller modifier tied directly to the care
+  requirement it corresponds to, edited in place, not a rate significant
+  enough to warrant its own history.
+- **No separate estimate/final method** — `calculate_price` is the one
+  call; an "estimated" price (customer-declared material/quantity) and
+  a "final" price (facility-verified, post-inspection) are just two
+  invocations with different inputs, not a different formula. Snapshotting
+  which rule versions produced a *stored* price — so a later rate change
+  can't retroactively alter an existing order's total — is Phase 8's job
+  once `Order`/`OrderItem` exist; `PriceBreakdown` already carries
+  `pricing_rule_id`/`material_pricing_rule_id` for exactly that.
+- All money fields are `Numeric(10, 2)`/`Decimal`, never `float` —
+  verified by a dedicated precision test
+  (`test_calculate_price_is_decimal_precise_not_float`) using inputs
+  that would accumulate floating-point error (`0.10 + 0.20*3`) if this
+  slipped to `float` anywhere in the chain.
+
 ### Migrations (`core/migrations/`, Alembic)
 - Owned by `core` since models live in `core/models/`. `washy_washy` has no
   migrations folder of its own.
@@ -704,7 +759,7 @@ require `require_role(RoleName.ADMIN.value)` — same router-level
 - `script.py.mako` generates modern-style revision files
   (`str | None`, `from collections.abc import Sequence`) so every future
   `alembic revision` output passes this project's ruff config as-is.
-- Six revisions exist, in this order (each hand-written to match the
+- Seven revisions exist, in this order (each hand-written to match the
   models exactly rather than trusted from a raw `--autogenerate` dump —
   reviewed per the project's migration-safety rule):
   1. `0a91544a311e` create identity and rbac core tables — `users`,
@@ -724,14 +779,18 @@ require `require_role(RoleName.ADMIN.value)` — same router-level
   5. `9ad4f2884494` create service area tables — `service_areas`,
      `service_area_postal_codes` (the latter references the former, so
      it must come second within this revision).
-  6. `368d5df746fb` (head) create catalog tables — `services`,
+  6. `368d5df746fb` create catalog tables — `services`,
      `materials` (independent parents), then `service_materials`
      (references both) and `partner_capabilities` (references
      `services` and the existing `partner_profiles`).
+  7. `f04acb897ec2` (head) create pricing tables + care_adjustment —
+     `pricing_rules`, `material_pricing_rules` (both independent,
+     versioned, partial-unique-indexed), plus `ALTER TABLE
+     service_materials ADD COLUMN care_adjustment`.
   `alembic upgrade head` has been run against real PostgreSQL — both a
   local install and, separately, the `docker-compose` `postgres`
-  container — and verified: all 15 tables exist (`alembic_version` +
-  the 14 above) with the four `RoleName` roles seeded. Every multi-table
+  container — and verified: all 17 tables exist (`alembic_version` +
+  the 16 above) with the four `RoleName` roles seeded. Every multi-table
   revision's full `downgrade` → `upgrade head` round-trip has been run
   and verified at the time it was added (tables dropped cleanly,
   recreated identically) — see §9/§10.
@@ -1047,6 +1106,26 @@ established.
 - `api/test_protected_routes_require_auth.py` extended with the new
   `/roles`, `/services`, `/materials` paths (Phase 5) — still no DB
   required, same reasoning as Phase 4's version of this file.
+- `unit/test_phase6_models.py` (Phase 6) — no DB required: `PricingModel`
+  matches the five spec'd values, `effective_to` is nullable on both
+  rule tables, each has exactly one partial unique index on its
+  `(service_id,)`/`(material_id,)`, `ON DELETE CASCADE` on both FKs, and
+  `service_materials.care_adjustment` exists and is nullable.
+- `integration/test_pricing.py` (Phase 6) — `PricingService` against
+  real PostgreSQL: set/get a service's active rule, setting a new price
+  closes the previous version (and the old row's own rate is
+  unchanged), same for material pricing, `calculate_price` for every
+  `PricingModel` (`PER_ITEM`/`PER_KG`/`PER_BAG`/`BASE_PLUS_WEIGHT`/
+  `CUSTOM`) with the matching required input and a rejection when the
+  wrong one is supplied, material/care adjustments included in the
+  subtotal, rush/delivery/tax/discount applied to reach the total,
+  `Decimal` precision holds for an input that would drift under
+  `float`, the "estimate vs. final" split is just two calls with
+  different inputs (not a different formula), and a breakdown computed
+  under an old rule version keeps referencing that exact `pricing_rule_id`
+  even after a newer version supersedes it.
+- `api/test_protected_routes_require_auth.py` extended with
+  `POST /pricing/estimate` (Phase 6).
 
 ## 9. Current status (keep this section accurate)
 
@@ -1056,32 +1135,71 @@ established.
 | `core/models` — infrastructure | Implemented (naming convention, `UUIDPrimaryKeyMixin`, `CreatedAtMixin`, `TimestampMixin`) |
 | `core/models` — identity/RBAC | Implemented: `User`, `Role`/`RoleName`, `Permission`/`PermissionScope`, `UserRole`, `RolePermission` |
 | `core/models` — operational user domain | Implemented (Phase 4): `CustomerProfile`, `PartnerProfile`/`PartnerStatus`, `Address`/`AddressLabel`, `ServiceArea`, `ServiceAreaPostalCode` |
-| `core/models` — catalog | Implemented (Phase 5): `Service`, `Material`, `ServiceMaterial`, `PartnerCapability` — **no other domain models yet** (orders, payments, ... are later phases) |
+| `core/models` — catalog | Implemented (Phase 5): `Service`, `Material`, `ServiceMaterial` (+ `care_adjustment` since Phase 6), `PartnerCapability` |
+| `core/models` — pricing | Implemented (Phase 6): `PricingRule`/`PricingModel`, `MaterialPricingRule` — **no other domain models yet** (orders, payments, ... are later phases) |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
-| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 6 revisions (identity+RBAC core tables → RBAC associations → seed foundational roles → profile/address tables → service area tables → catalog tables). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 15 tables exist, 4 roles seeded, full `pytest` suite (209 tests) passes with 0 skips against it |
-| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, and `catalog` require `ADMIN` |
-| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service` |
-| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo` |
+| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 7 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 17 tables exist, 4 roles seeded, full `pytest` suite (235 tests) passes with 0 skips against it |
+| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, and `pricing` require `ADMIN` |
+| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service` |
+| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo` |
 | `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission` — wired since Phase 4 |
-| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 9 tags + response-envelope description) |
+| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 10 tags + response-envelope description) |
 | `washy_washy/utils` | Empty scaffold |
 | Auth (`/auth/register\|login\|refresh`, JWT issuance/verification) | Implemented (Phase 2) |
-| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), enforced on `service-areas`/`roles`/`catalog` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
+| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), enforced on `service-areas`/`roles`/`catalog`/`pricing` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
 | Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — an admin cannot revoke their own `ADMIN` role |
 | Catalog (`Service`/`Material`/compatibility/`PartnerCapability`) | Implemented (Phase 5) — `PartnerCapability` has a service layer but no API endpoint yet |
-| Pricing / Orders / Payments | Not started |
+| Pricing (`PricingRule`/`MaterialPricingRule`/`calculate_price`) | Implemented (Phase 6) — no order to snapshot a computed price onto yet (Phase 8) |
+| Orders / Payments | Not started |
 | Redis / Celery / APISIX | Not introduced |
-| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 5's changes (rebuilt, migrated inside the container, hit through port `8080`). Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
+| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 6's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
 
 Roadmap (see `README.md` for the full phase list): Phase 0 (foundation) →
 Phase 1A–1D (database + identity/RBAC models) → Phase 2 Authentication →
 Phase 3 RBAC runtime → Phase 4: Users/Profiles/Addresses/Service Areas →
-admin role management addendum → **(this update) Phase 5: Catalog** →
-Phase 6 Pricing → ... → Phase 14 Production/AWS.
+admin role management addendum → Phase 5: Catalog →
+**(this update) Phase 6: Pricing Engine** → Phase 7 Availability → ... →
+Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-27 (latest)** — Phase 5, Catalog / Services / Materials:
+- **2026-09-27 (latest)** — Phase 6, Pricing Engine:
+  - Added `core/models/{pricing_rule,material_pricing_rule}.py`
+    (`PricingRule`/`PricingModel`, `MaterialPricingRule`), registered in
+    `core/models/__init__.py`; added `care_adjustment` to
+    `core/models/service_material.py` (Phase 5's table).
+  - Added Alembic revision `f04acb897ec2` (head) — `pricing_rules`,
+    `material_pricing_rules`, `ALTER TABLE service_materials ADD
+    COLUMN care_adjustment`. Run against live PostgreSQL;
+    `downgrade`/`upgrade` round-trip verified.
+  - Added `washy_washy/repositories/{pricing_rule,material_pricing_rule}_repo.py`,
+    `washy_washy/services/pricing_service.py` (`PricingService`,
+    `PriceBreakdown`), `washy_washy/schemas/pricing.py`,
+    `washy_washy/api/v1/{routes,controllers}/pricing.py` — `GET/POST
+    /services/{id}/pricing`, `GET/POST /materials/{id}/pricing`, `POST
+    /pricing/estimate`. Extended `CatalogService.set_compatibility`/
+    `SetCompatibilityRequest` with `care_adjustment`. Added
+    `NO_ACTIVE_PRICING_RULE`/`QUANTITY_REQUIRED`/`WEIGHT_REQUIRED`/
+    `UNKNOWN_PRICING_MODEL` to `error_{codes,messages}.py`.
+  - **Design decisions** (see §6i for full rationale): each pricing-rule
+    row *is* a version (no separate version table); rush/delivery/tax/
+    discount are `calculate_price` inputs, not stored rates;
+    `care_adjustment` is not independently versioned; no separate
+    estimate/final method (same call, different inputs) — persisting a
+    computed price onto an order is deferred to Phase 8.
+  - Added `tests/unit/test_phase6_models.py`,
+    `tests/integration/test_pricing.py` (incl. a `Decimal`-vs-`float`
+    precision regression check); extended
+    `tests/api/test_protected_routes_require_auth.py` with
+    `POST /pricing/estimate`.
+  - **Not implemented, by design**: no order/invoice to snapshot a
+    price onto, no tax/rush/delivery policy tables, no availability/
+    capacity (Phase 7).
+  - **Verification**: `ruff check .` clean (first try); `pytest` —
+    **235 passed, 0 failed** against live PostgreSQL (up from 209).
+    Migration round-trip run for real. Live `uvicorn` smoke test: a
+    non-admin authenticated user gets `403` setting a service's price.
+- **2026-09-27** — Phase 5, Catalog / Services / Materials:
   - Added `core/models/{service,material,service_material,
     partner_capability}.py`, all registered in `core/models/__init__.py`;
     added the back-reference relationship on `PartnerProfile`.

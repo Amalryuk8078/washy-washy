@@ -1,17 +1,17 @@
 # Washy Washy Backend
 
 FastAPI backend foundation for **Washy Washy**, a laundry-service platform.
-This repository is currently at **Phase 5 — Catalog / Services /
-Materials**, built on Phase 0 (HTTP skeleton), Phase 1 (database +
-identity/RBAC), Phase 2 (authentication), Phase 3
-(`require_role`/`require_permission`), and Phase 4 (users/profiles/
-addresses/service areas — the first protected endpoints). Phase 5 adds
-`Service`/`Material`/their compatibility, and which services a partner
-can perform (`PartnerCapability`) — the catalog, deliberately independent
-of pricing (Phase 6) and availability/capacity (Phase 7). An admin
-role-management API (`/roles`, `/users/{id}/roles`) was also added as a
-small addendum closing a gap Phase 3/4 explicitly deferred. See the
-Roadmap.
+This repository is currently at **Phase 6 — Pricing Engine**, built on
+Phase 0–5 (HTTP skeleton, auth, RBAC, users/profiles/addresses/service
+areas, and the catalog). Phase 6 adds backend-authoritative,
+**versioned** pricing (`PricingRule` per service, `MaterialPricingRule`
+per material — a price change opens a new version and closes the old
+one, never rewriting it) and `PricingService.calculate_price`, which
+returns an explicit breakdown (base, material/care adjustments,
+quantity charge, rush, delivery, tax, discount, subtotal, total) —
+never just a total. An admin role-management API (`/roles`,
+`/users/{id}/roles`) was added as a small addendum between Phase 4 and
+5, closing a gap those phases explicitly deferred. See the Roadmap.
 
 ## Overview
 
@@ -85,29 +85,31 @@ washy-washy-backend/
 │   │   ├── logging/         # structured logging setup
 │   │   ├── middleware/      # request-id correlation middleware
 │   │   ├── exceptions/      # AppException family + FastAPI handlers
-│   │   └── migrations/      # Alembic env.py, versions/ (6 revisions so far)
+│   │   └── migrations/      # Alembic env.py, versions/ (7 revisions so far)
 │   │
 │   └── washy_washy/
 │       ├── main.py          # FastAPI app construction
 │       ├── __main__.py      # `python -m washy_washy`
 │       ├── config.py        # service-level Settings(CoreSettings)
 │       ├── api/v1/routes/   # health, auth, users, customers, addresses,
-│       │                    # service_areas, roles, catalog
+│       │                    # service_areas, roles, catalog, pricing
 │       ├── api/v1/controllers/  # same set
 │       ├── dependencies/    # auth.py: get_current_user
 │       │                    # rbac.py: require_role, require_permission
 │       ├── constants/       # error codes / messages (AUTH_*, profile/
-│       │                    # service-area/role/catalog conflict codes)
+│       │                    # service-area/role/catalog/pricing conflict codes)
 │       ├── schemas/         # common, auth, profile, address, service_area,
-│       │                    # role, catalog
+│       │                    # role, catalog, pricing
 │       ├── repositories/    # user, role, permission, user_role,
 │       │                    # role_permission, customer_profile,
 │       │                    # partner_profile, address, service_area,
 │       │                    # service, material, service_material,
-│       │                    # partner_capability
+│       │                    # partner_capability, pricing_rule,
+│       │                    # material_pricing_rule
 │       ├── services/        # auth_service, rbac_service, profile_service,
 │       │                    # address_service, service_area_service,
-│       │                    # catalog_service, partner_capability_service
+│       │                    # catalog_service, partner_capability_service,
+│       │                    # pricing_service
 │       ├── docs/            # openapi.py (tags + custom_openapi),
 │       │                    # swagger_ui.py (branded /docs, /redoc)
 │       ├── static/          # swagger-custom.css, favicon.svg
@@ -648,6 +650,52 @@ GET      /api/v1/materials/{id}/services                 -> compatible services
   ask for one; same "build the piece, don't force a premature endpoint"
   pattern as `PartnerProfile` in Phase 4.
 
+## Pricing (Phase 6)
+
+```text
+GET/POST /api/v1/services/{id}/pricing    -> current rate / set a new version (ADMIN)
+GET/POST /api/v1/materials/{id}/pricing   -> current adjustment / set a new version (ADMIN)
+POST     /api/v1/pricing/estimate         -> price breakdown for a service+material+quantity
+```
+
+Formula: `total = base + material_adjustment + care_adjustment +
+quantity_charge + rush_charge + delivery_charge + tax - discount`,
+where `subtotal = base + material_adjustment + care_adjustment +
+quantity_charge`. `PricingService.calculate_price` always returns every
+component (`PriceBreakdown`), never just the total.
+
+- **`PricingRule`/`MaterialPricingRule`** — each row *is* a version:
+  setting a new rate closes the current active row (`effective_to =
+  now()`) and inserts a new one; a rate change never rewrites an
+  existing row's price. At most one active (`effective_to IS NULL`) row
+  per service/material, enforced by a partial unique index — same
+  pattern as `Address`'s one-default-per-user index (Phase 4). Two
+  separate flushes (close, then insert), not one, so the two rows are
+  never simultaneously active mid-flush.
+- **`pricing_model`** (`PER_ITEM`/`PER_KG`/`PER_BAG`/`BASE_PLUS_WEIGHT`/
+  `CUSTOM`, plain string, not DB-enforced) determines how `unit_price`
+  combines with the caller's `quantity`/`weight_kg`/`custom_charge` —
+  passing the wrong one for the active model is a clean
+  `422 QUANTITY_REQUIRED`/`WEIGHT_REQUIRED`, not a silent zero.
+- **Rush charge, delivery charge, tax, and discount are caller-supplied
+  inputs to the calculation, not stored catalog rates** — the spec's own
+  input list for the pricing service treats them this way; a generic
+  "global tax rate" table would be speculative before a real policy
+  need shows up (e.g. once Phase 10 payments/invoices need one).
+- **`ServiceMaterial.care_adjustment`** (new column) is *not*
+  independently versioned — it's a smaller modifier attached directly
+  to the care requirement it corresponds to, edited in place like the
+  rest of that row, not a rate significant enough to warrant version
+  history of its own.
+- **No separate "estimate" vs. "final" method** — `calculate_price` is
+  the same call either way; Phase 8's order flow will call it once with
+  customer-declared material/quantity (estimate) and again with
+  facility-verified values after inspection (final). Persisting *which*
+  rule version produced a stored price, so a later rate change can't
+  alter an existing order's total, is Phase 8's job once `Order`/
+  `OrderItem` exist — `PriceBreakdown` already carries the rule ids a
+  snapshot would need.
+
 ## Database setup / Alembic
 
 Migrations are owned by `core` (models live in `core/models/`); the
@@ -676,10 +724,12 @@ db9e1e1a26b8  seed foundational roles                (idempotent data seed)
 3587faef9553  create profile and address tables       (customer_profiles, partner_profiles, addresses)
 9ad4f2884494  create service area tables              (service_areas, service_area_postal_codes)
 368d5df746fb  create catalog tables                   (services, materials, service_materials,
-                                                        partner_capabilities, head)
+                                                        partner_capabilities)
+f04acb897ec2  create pricing tables + care_adjustment (pricing_rules, material_pricing_rules,
+                                                        service_materials.care_adjustment, head)
 ```
 
-All six were hand-written to match the models exactly (reviewed rather
+All seven were hand-written to match the models exactly (reviewed rather
 than a raw `--autogenerate` dump, per the project's migration-safety
 rule). `alembic upgrade head` has been run end-to-end against a real
 PostgreSQL instance (both a local install and, separately, the
@@ -742,8 +792,8 @@ Docker" above, then `alembic upgrade head`) and **skips itself cleanly**
 migrated yet — so `pytest` alone is always self-contained whether or not
 a database is up. Each integration test runs inside its own transaction
 that's rolled back on teardown, so they never leave rows behind. Verified
-end-to-end against a real PostgreSQL instance: **209 passed, 0 skipped,
-0 failed** (up from 163 as of Phase 4) — reproducibly, from a cold shell
+end-to-end against a real PostgreSQL instance: **235 passed, 0 skipped,
+0 failed** (up from 209 as of Phase 5) — reproducibly, from a cold shell
 with nothing pre-exported.
 (`tests/conftest.py`'s `DATABASE_URL`/`JWT_SECRET` fallback only applies
 when no `.env` exists — it used to apply unconditionally via
@@ -808,8 +858,8 @@ Phase 1D  UserRole / RolePermission associations
 Phase 2   Authentication (register/login/refresh, JWT, get_current_user)
 Phase 3   RBAC runtime (require_role/require_permission)
 Phase 4   Users / Profiles / Addresses / Service Areas
-Phase 5   Catalog + Services + Materials                                ← you are here
-Phase 6   Pricing Engine
+Phase 5   Catalog + Services + Materials
+Phase 6   Pricing Engine                                                ← you are here
 Phase 7   Availability + Slots + Capacity
 Phase 8   Orders + State Machine
 Phase 9   Partner Operations
@@ -820,9 +870,10 @@ Phase 13  Flutter Integration
 Phase 14  Production / AWS
 ```
 
-Phase 5 deliberately stops at the catalog: no pricing (Phase 6), no
-availability/capacity for partner capabilities (Phase 7), no
-`/partners/{id}/capabilities` endpoint (model/service exist, unexposed
-— same pattern as `/partners/me` in Phase 4), and no
-availability/slot-capacity enforcement on serviceability (Phase 7).
+Phase 6 deliberately stops at pricing: no availability/slot capacity
+(Phase 7), no `Order`/`OrderItem` to snapshot a computed price onto
+(Phase 8) — `PriceBreakdown` carries the rule ids a future snapshot
+would need, but nothing persists one yet — and no tax/rush/delivery
+*policy* tables (those remain caller-supplied inputs; a real policy
+store is deferred until an actual need shows up, likely Phase 10).
 Orders/payments are not started.

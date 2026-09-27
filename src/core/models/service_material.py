@@ -5,20 +5,25 @@ care/handling requirements specific to that (service, material) pair
 Uses ``TimestampMixin`` (mutable, with ``updated_at``), not
 ``CreatedAtMixin`` — unlike a pure yes/no grant (``UserRole``,
 ``PartnerCapability``), this row carries real content (care
-instructions, temperature) that legitimately gets corrected/updated in
-place over time, not just granted or revoked.
+instructions, temperature, and — as of Phase 6 — a care price
+adjustment) that legitimately gets corrected/updated in place over
+time, not just granted or revoked.
 
-Deliberately simple: two optional fields, not a rules engine. Extend
-this table's columns if a real, concrete new requirement shows up
-rather than generalizing ahead of one.
+``care_adjustment`` is **not** independently versioned the way
+``PricingRule``/``MaterialPricingRule`` are (Phase 6): it's a smaller,
+directly-editable modifier attached to the exact care requirement it
+corresponds to, not a rate significant enough to warrant its own
+version history. Extend this table's columns if a real, concrete new
+requirement shows up rather than generalizing ahead of one.
 """
 
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database.base import Base
@@ -40,6 +45,7 @@ class ServiceMaterial(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     care_instructions: Mapped[str | None] = mapped_column(String(500), nullable=True)
     max_temperature_celsius: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    care_adjustment: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
 
     service: Mapped[Service] = relationship("Service", back_populates="service_materials")
     material: Mapped[Material] = relationship("Material", back_populates="service_materials")

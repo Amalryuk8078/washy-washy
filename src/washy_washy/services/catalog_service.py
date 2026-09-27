@@ -7,6 +7,7 @@ Deliberately independent of pricing (Phase 6) and availability/capacity
 """
 
 import uuid
+from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,6 +84,7 @@ class CatalogService:
         *,
         care_instructions: str | None = None,
         max_temperature_celsius: int | None = None,
+        care_adjustment: Decimal | None = None,
     ) -> ServiceMaterial:
         """Creates the (service, material) compatibility row, or updates
         the existing one's care metadata in place if it already exists
@@ -96,6 +98,7 @@ class CatalogService:
         if existing is not None:
             existing.care_instructions = care_instructions
             existing.max_temperature_celsius = max_temperature_celsius
+            existing.care_adjustment = care_adjustment
             return await self._service_materials.update(existing)
 
         service_material = ServiceMaterial(
@@ -103,6 +106,7 @@ class CatalogService:
             material_id=material_id,
             care_instructions=care_instructions,
             max_temperature_celsius=max_temperature_celsius,
+            care_adjustment=care_adjustment,
         )
         return await self._service_materials.create(service_material)
 

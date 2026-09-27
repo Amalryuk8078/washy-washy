@@ -11,10 +11,12 @@ from core.models.address import Address, AddressLabel
 from core.models.base import Base
 from core.models.customer_profile import CustomerProfile
 from core.models.material import Material
+from core.models.material_pricing_rule import MaterialPricingRule
 from core.models.mixins import CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from core.models.partner_capability import PartnerCapability
 from core.models.partner_profile import PartnerProfile, PartnerStatus
 from core.models.permission import Permission, PermissionScope
+from core.models.pricing_rule import PricingModel, PricingRule
 from core.models.role import Role, RoleName
 from core.models.role_permission import RolePermission
 from core.models.service import Service
@@ -47,4 +49,7 @@ __all__ = [
     "Material",
     "ServiceMaterial",
     "PartnerCapability",
+    "PricingRule",
+    "PricingModel",
+    "MaterialPricingRule",
 ]

@@ -100,6 +100,7 @@ async def set_compatibility(
         request.material_id,
         care_instructions=request.care_instructions,
         max_temperature_celsius=request.max_temperature_celsius,
+        care_adjustment=request.care_adjustment,
     )
     await db_session.commit()
     return ServiceMaterialResponse.model_validate(result)
