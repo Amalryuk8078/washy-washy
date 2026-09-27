@@ -1,19 +1,18 @@
 # Washy Washy Backend
 
 FastAPI backend foundation for **Washy Washy**, a laundry-service platform.
-This repository is currently at **Phase 8 — Orders / State Machine**,
-built on Phase 0–7 (HTTP skeleton, auth, RBAC, users/profiles/addresses/
-service areas, catalog, pricing, availability/slots/capacity). Phase 8
-adds `Order`/`OrderItem`/`OrderStatusHistory` and the full 24-state
-order lifecycle, with every transition validated against a central
-graph and executed via the same **race-free atomic `UPDATE`** pattern
-Phase 7 used for slot capacity — verified under real concurrent load,
-not just sequential-logic tests. A plain customer may submit/cancel
-their own order; the rest of the pipeline requires staff (`ADMIN`/
-`SUPERVISOR`/`LAUNDRY_PARTNER`). An admin role-management API
-(`/roles`, `/users/{id}/roles`) was added as a small addendum between
-Phase 4 and 5, closing a gap those phases explicitly deferred. See the
-Roadmap.
+This repository is currently at **Phase 9 — Partner Operations**, built
+on Phase 0–8 (HTTP skeleton, auth, RBAC, users/profiles/addresses/
+service areas, catalog, pricing, availability/slots/capacity, orders/
+state machine). Phase 9 adds `PartnerFacility` (finally linking a
+partner to a service area, closing a gap Phase 7 explicitly deferred),
+order assignment (facility/pickup operator/delivery operator, kept
+deliberately separate from scheduling and fully audited in
+`OrderAssignmentHistory`), the `PartnerStatus` onboarding lifecycle, and
+facility-inspection detail (condition/damage) on order items. An admin
+role-management API (`/roles`, `/users/{id}/roles`) was added as a
+small addendum between Phase 4 and 5, closing a gap those phases
+explicitly deferred. See the Roadmap.
 
 ## Overview
 
@@ -87,13 +86,15 @@ washy-washy-backend/
 │   │   │                    # MaterialPricingRule, OperatingHours,
 │   │   │                    # PartnerAvailability, PickupSlot, DeliverySlot,
 │   │   │                    # PickupSlotReservation, DeliverySlotReservation,
-│   │   │                    # Order, OrderItem, OrderStatusHistory
+│   │   │                    # Order, OrderItem, OrderStatusHistory,
+│   │   │                    # PartnerFacility, AssignmentRole,
+│   │   │                    # OrderAssignmentHistory
 │   │   ├── security/        # password hashing, JWT encode/decode
 │   │   ├── dependencies/    # get_db_session
 │   │   ├── logging/         # structured logging setup
 │   │   ├── middleware/      # request-id correlation middleware
 │   │   ├── exceptions/      # AppException family + FastAPI handlers
-│   │   └── migrations/      # Alembic env.py, versions/ (9 revisions so far)
+│   │   └── migrations/      # Alembic env.py, versions/ (10 revisions so far)
 │   │
 │   └── washy_washy/
 │       ├── main.py          # FastAPI app construction
@@ -101,16 +102,17 @@ washy-washy-backend/
 │       ├── config.py        # service-level Settings(CoreSettings)
 │       ├── api/v1/routes/   # health, auth, users, customers, addresses,
 │       │                    # service_areas, roles, catalog, pricing,
-│       │                    # availability, orders
+│       │                    # availability, orders, facilities, partners
 │       ├── api/v1/controllers/  # same set
 │       ├── dependencies/    # auth.py: get_current_user
 │       │                    # rbac.py: require_role, require_permission,
 │       │                    # require_any_role
 │       ├── constants/       # error codes / messages (AUTH_*, profile/
 │       │                    # service-area/role/catalog/pricing/
-│       │                    # availability/order conflict codes)
+│       │                    # availability/order/partner conflict codes)
 │       ├── schemas/         # common, auth, profile, address, service_area,
-│       │                    # role, catalog, pricing, availability, orders
+│       │                    # role, catalog, pricing, availability, orders,
+│       │                    # facilities
 │       ├── repositories/    # user, role, permission, user_role,
 │       │                    # role_permission, customer_profile,
 │       │                    # partner_profile, address, service_area,
@@ -120,12 +122,14 @@ washy-washy-backend/
 │       │                    # partner_availability, pickup_slot,
 │       │                    # delivery_slot, pickup_slot_reservation,
 │       │                    # delivery_slot_reservation, order, order_item,
-│       │                    # order_status_history
+│       │                    # order_status_history, partner_facility,
+│       │                    # order_assignment_history
 │       ├── services/        # auth_service, rbac_service, profile_service,
 │       │                    # address_service, service_area_service,
 │       │                    # catalog_service, partner_capability_service,
 │       │                    # pricing_service, availability_service,
-│       │                    # order_service, order_state_service
+│       │                    # order_service, order_state_service,
+│       │                    # facility_service, assignment_service
 │       ├── docs/            # openapi.py (tags + custom_openapi),
 │       │                    # swagger_ui.py (branded /docs, /redoc)
 │       ├── static/          # swagger-custom.css, favicon.svg
@@ -139,14 +143,16 @@ washy-washy-backend/
     │                        # test_rbac_models, test_auth_tokens_and_schemas,
     │                        # test_phase4_models, test_phase5_models,
     │                        # test_phase6_models, test_phase7_models,
-    │                        # test_phase8_models (no DB required)
+    │                        # test_phase8_models, test_phase9_models
+    │                        # (no DB required)
     ├── integration/         # test_database_connection, test_user_identity,
     │                        # test_rbac_associations, test_auth,
     │                        # test_rbac_runtime, test_profiles,
     │                        # test_addresses, test_service_areas,
     │                        # test_catalog, test_pricing, test_availability,
     │                        # test_availability_concurrency, test_orders,
-    │                        # test_order_state_machine
+    │                        # test_order_state_machine,
+    │                        # test_partner_facilities, test_order_assignment
     │                        # (require a live, migrated DB)
     └── api/                 # test_auth_routes, test_protected_routes_require_auth
                               # (HTTP-level, validation-only, no DB)
@@ -833,6 +839,71 @@ route or controller hard-codes "if status == X."
   `delivery_reservation_id` columns exist per the spec's field list,
   unpopulated until Phase 9).
 
+## Partner Operations (Phase 9)
+
+```text
+POST   /api/v1/partners/{id}/facilities            -> create a facility (ADMIN)
+GET    /api/v1/partners/{id}/facilities            -> list a partner's facilities
+GET    /api/v1/partner-facilities                  -> list all active facilities
+GET    /api/v1/partner-facilities/{id}              -> get one
+PATCH  /api/v1/partner-facilities/{id}               -> activate/deactivate (ADMIN)
+PATCH  /api/v1/partners/{id}/status                  -> PartnerStatus lifecycle (ADMIN)
+
+POST   /api/v1/orders/{id}/assign-facility            -> staff only
+POST   /api/v1/orders/{id}/assign-pickup-operator     -> staff only
+POST   /api/v1/orders/{id}/assign-delivery-operator   -> staff only
+GET    /api/v1/orders/{id}/assignments                -> own order, or staff
+```
+
+- **`PartnerFacility`** finally establishes the `PartnerProfile <->
+  ServiceArea` link Phase 7's `has_capable_partner` docstring predicted
+  would land in Phase 9. It carries its **own** address columns rather
+  than an FK to `addresses` — a facility's location isn't "one of a
+  user's own addresses" in the sense `Address`/`AddressService` are
+  built around, so a handful of duplicated columns keeps the two
+  concepts separate. `daily_capacity` is **informational only** —
+  actual booking capacity remains exclusively Phase 7's
+  `PickupSlot`/`DeliverySlot.capacity_total`, never a second source of
+  truth.
+- **Assignment is deliberately independent of scheduling**, per the
+  spec's own instruction: `assigned_facility_id`/
+  `pickup_operator_user_id`/`delivery_operator_user_id` on `Order` are
+  separate from `pickup_slot_id`/`delivery_slot_id`. Assigning a
+  facility validates it's actually in the order's own service area
+  (`422 FACILITY_OUTSIDE_SERVICE_AREA` otherwise); assigning an
+  operator validates they hold a staff role (`422
+  OPERATOR_MUST_BE_STAFF` otherwise — a customer can never end up as an
+  operator).
+  - **Assigning a pickup/delivery operator for the first time also
+    drives the matching `OrderStatus` transition**
+    (`PICKUP_SCHEDULED -> PICKUP_ASSIGNED` / `READY_FOR_DELIVERY ->
+    DELIVERY_ASSIGNED`), reusing Phase 8's `OrderStateService`
+    directly. **Reassigning** an order that's already moved past that
+    status only updates who's assigned — it never tries to re-fire a
+    transition that's no longer legal from wherever the order now is.
+  - Every assignment/reassignment is recorded in the new
+    `OrderAssignmentHistory`, mirroring `OrderStatusHistory` exactly —
+    nothing is ever silently overwritten.
+- **`PartnerStatus` onboarding lifecycle** (`PATCH
+  /partners/{id}/status`) — the workflow Phase 4's own docstring
+  explicitly deferred to this phase. Deliberately **not** a validated
+  state machine like orders: an admin may move a partner between
+  `PENDING`/`ACTIVE`/`SUSPENDED`/`INACTIVE` freely, since there's no
+  equivalent of "physically already picked up" that would make a move
+  genuinely unsafe.
+- **Facility inspection extensions** — `condition_notes`/
+  `damage_reported` on `OrderItem`, settable through the same
+  itemize endpoint Phase 8 already exposed. Neither feeds into pricing
+  directly; a damaged item still needs a human pricing decision,
+  out of scope here. `final_line_total` remains reachable only through
+  `finalize-price`'s controlled recomputation — still no path for a
+  caller to directly overwrite a finalized price.
+- **Not implemented, by design**: `has_capable_partner` (Phase 7) is
+  still global, not area-scoped — `PartnerFacility` makes that fixable,
+  but wiring real enforcement is a separate follow-up; no
+  facility-capacity *enforcement*; no supervisor-vs-partner permission
+  split (both remain interchangeable "staff" for every order operation).
+
 ## Database setup / Alembic
 
 Migrations are owned by `core` (models live in `core/models/`); the
@@ -869,20 +940,25 @@ f04acb897ec2  create pricing tables + care_adjustment (pricing_rules, material_p
                                                         pickup_slot_reservations,
                                                         delivery_slot_reservations)
 964739b60e1b  create orders and state machine tables  (orders, order_items,
-                                                        order_status_history, head)
+                                                        order_status_history)
+3b8164c9fa11  add partner operations tables + order    (partner_facilities, orders.*
+              assignment columns                        assignment columns, order_items.*
+                                                        inspection columns,
+                                                        order_assignment_history, head)
 ```
 
-All nine were hand-written to match the models exactly (reviewed rather
+All ten were hand-written to match the models exactly (reviewed rather
 than a raw `--autogenerate` dump, per the project's migration-safety
 rule). `alembic upgrade head` has been run end-to-end against a real
 PostgreSQL instance (both a local install and, separately, the
 `docker-compose` `postgres` container) — schema, seeded roles, and every
 table/index/constraint verified by querying the database directly, plus
-the full `pytest` suite (300 tests) passing with zero skips against it.
+the full `pytest` suite (327 tests) passing with zero skips against it.
 The newest revision's full `upgrade`/`downgrade`/`upgrade` round-trip
-was also run and verified (all 3 Phase 8 tables dropped cleanly on
-downgrade, recreated identically on re-upgrade) — see "Running tests"
-below.
+was also run and verified (the `partner_facilities`/
+`order_assignment_history` tables and every new column dropped cleanly
+on downgrade, recreated identically on re-upgrade) — see "Running
+tests" below.
 
 ## API documentation (Swagger / ReDoc)
 
@@ -939,8 +1015,8 @@ that's rolled back on teardown, so they never leave rows behind — except
 concurrency test, which deliberately use independent database
 connections (a genuine race needs separate connections, not one
 connection's savepoints) and clean up manually in a `finally` block.
-Verified end-to-end against a real PostgreSQL instance: **300 passed, 0
-skipped, 0 failed** (up from 265 as of Phase 7) — reproducibly, from a
+Verified end-to-end against a real PostgreSQL instance: **327 passed, 0
+skipped, 0 failed** (up from 300 as of Phase 8) — reproducibly, from a
 cold shell with nothing pre-exported.
 (`tests/conftest.py`'s `DATABASE_URL`/`JWT_SECRET` fallback only applies
 when no `.env` exists — it used to apply unconditionally via
@@ -1008,8 +1084,8 @@ Phase 4   Users / Profiles / Addresses / Service Areas
 Phase 5   Catalog + Services + Materials
 Phase 6   Pricing Engine
 Phase 7   Availability + Slots + Capacity
-Phase 8   Orders + State Machine                                        ← you are here
-Phase 9   Partner Operations
+Phase 8   Orders + State Machine
+Phase 9   Partner Operations                                            ← you are here
 Phase 10  Payments + Invoices + Refunds
 Phase 11  Redis + Celery
 Phase 12  APISIX + etcd
@@ -1017,8 +1093,10 @@ Phase 13  Flutter Integration
 Phase 14  Production / AWS
 ```
 
-Phase 8 deliberately stops at orders: no partner-to-order assignment
-(Phase 9), no real payment gateway behind `PENDING_PAYMENT ->
-CONFIRMED` (Phase 10 — currently a plain staff-triggered status flip),
-and no delivery-slot scheduling workflow (the columns exist per the
-spec's field list, unpopulated). Payments are not started.
+Phase 9 deliberately stops at partner operations: `has_capable_partner`
+(Phase 7) still isn't area-scoped despite `PartnerFacility` now
+existing to support it; no facility-capacity enforcement (the field is
+informational only); no supervisor-vs-partner permission split (both
+remain interchangeable "staff"); no real payment gateway behind
+`PENDING_PAYMENT -> CONFIRMED` (Phase 10 — currently a plain
+staff-triggered status flip). Payments are not started.

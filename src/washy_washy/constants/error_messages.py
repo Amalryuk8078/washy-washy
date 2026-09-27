@@ -54,3 +54,10 @@ INVALID_ORDER_STATE_TRANSITION = (
 ORDER_STATE_CONFLICT = (
     "The order's status changed before this transition could be applied. Please retry."
 )
+
+# Partner operations (Phase 9)
+FACILITY_NAME_ALREADY_EXISTS = "This partner already has a facility with this name."
+FACILITY_OUTSIDE_SERVICE_AREA = "This facility is not in the order's service area."
+OPERATOR_MUST_BE_STAFF = (
+    "The assigned user must hold a staff role (ADMIN, SUPERVISOR, or LAUNDRY_PARTNER)."
+)

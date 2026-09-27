@@ -32,6 +32,18 @@ enough to identify *which* reservation to release.
 the Phase 8 spec's field list, but no scheduling workflow populates
 them yet — delivery scheduling is operational detail that belongs to
 Phase 9 (Partner Operations).
+
+**Phase 9 addendum — assignment columns.** ``assigned_facility_id``/
+``pickup_operator_user_id``/``delivery_operator_user_id`` are
+deliberately kept separate from scheduling (``pickup_slot_id`` etc.)
+per the Phase 9 spec's own instruction: *who* is handling an order and
+*when* it happens are independent concerns. ``assigned_facility_id``
+has no ``ondelete`` (a reference, same reasoning as
+``service_area_id``); the two operator columns are ``ON DELETE SET
+NULL`` — a staff account being deleted should clear the assignment,
+not silently cascade-delete the order or block the user's own
+deletion. Every assignment/reassignment is recorded in
+``OrderAssignmentHistory``, never overwritten silently.
 """
 
 from __future__ import annotations
@@ -106,6 +118,15 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     delivery_reservation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("delivery_slot_reservations.id"), nullable=True
+    )
+    assigned_facility_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("partner_facilities.id"), nullable=True
+    )
+    pickup_operator_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    delivery_operator_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[str] = mapped_column(
         String(30),

@@ -58,3 +58,24 @@ class ProfileService:
         if profile is None:
             raise NotFoundException(error_messages.NOT_FOUND, error_codes.NOT_FOUND)
         return profile
+
+    async def get_partner_profile_by_id(self, partner_profile_id: uuid.UUID) -> PartnerProfile:
+        profile = await self._partner_profiles.get_by_id(partner_profile_id)
+        if profile is None:
+            raise NotFoundException(error_messages.NOT_FOUND, error_codes.NOT_FOUND)
+        return profile
+
+    async def update_partner_status(
+        self, partner_profile_id: uuid.UUID, status: str
+    ) -> PartnerProfile:
+        """The onboarding/vetting lifecycle Phase 4's own docstring
+        deferred to Phase 9. Deliberately not a validated state
+        machine like ``OrderStateService`` — an admin may move a
+        partner between ``PENDING``/``ACTIVE``/``SUSPENDED``/
+        ``INACTIVE`` freely; there's no equivalent of "physically
+        already picked up" that would make a move actually unsafe, so
+        a full transition graph would be process for its own sake.
+        """
+        profile = await self.get_partner_profile_by_id(partner_profile_id)
+        profile.status = status
+        return await self._partner_profiles.update(profile)

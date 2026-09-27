@@ -9,23 +9,22 @@
 ## 1. What this is
 
 FastAPI backend for **Washy Washy**, a laundry-service platform. Single
-**modular monolith** (not microservices). Currently at **Phase 8 —
-Orders / State Machine**, built on Phase 0–7 (HTTP skeleton, auth,
-RBAC, users/profiles/addresses/service areas, catalog, pricing,
-availability/slots/capacity). Phase 8 adds `Order`/`OrderItem`/
-`OrderStatusHistory` and the full 24-state order lifecycle
-(`OrderStatus`), with every transition validated against a central,
-hand-written transition graph and executed via the same atomic
-conditional-`UPDATE` pattern Phase 7 used for capacity — so two
-concurrent requests can never both move an order at once. A plain
-customer may submit/cancel their own order; the rest of the pipeline
-(confirmation onward) requires staff (`ADMIN`/`SUPERVISOR`/
-`LAUNDRY_PARTNER`). An admin role-management API was added as a small
-addendum between Phase 4 and 5, closing a gap those phases explicitly
-deferred. This environment's database/migrations/Docker have all been
-verified end-to-end against a real PostgreSQL (300/300 tests passing)
-and `/docs`/`/redoc` carry Washy Washy branding — see §6e–§6k and the
-changelog. Payments are not yet implemented.
+**modular monolith** (not microservices). Currently at **Phase 9 —
+Partner Operations**, built on Phase 0–8 (HTTP skeleton, auth, RBAC,
+users/profiles/addresses/service areas, catalog, pricing, availability/
+slots/capacity, orders/state machine). Phase 9 adds `PartnerFacility`
+(finally establishing the `PartnerProfile <-> ServiceArea` link Phase 7
+deferred), order assignment (facility/pickup operator/delivery
+operator, kept deliberately separate from scheduling, recorded in the
+new `OrderAssignmentHistory`), the `PartnerStatus` onboarding lifecycle,
+and facility-inspection detail (`condition_notes`/`damage_reported` on
+`OrderItem`). Assigning a pickup/delivery operator for the first time
+also drives the matching `OrderStatus` transition, reusing Phase 8's
+state machine rather than duplicating it. This environment's database/
+migrations/Docker have all been verified end-to-end against a real
+PostgreSQL (327/327 tests passing) and `/docs`/`/redoc` carry Washy
+Washy branding — see §6e–§6l and the changelog. Payments are not yet
+implemented.
 
 Target system context (only FastAPI + PostgreSQL exist today; the rest are
 future phases):
@@ -986,6 +985,112 @@ POST   /orders/{id}/finalize-price        -> ADMIN/SUPERVISOR/LAUNDRY_PARTNER on
   per the spec's field list, but no endpoint populates them yet — that
   operational detail belongs to Phase 9 alongside delivery assignment).
 
+### 6l. Partner operations (`washy_washy/{services/{facility_service,assignment_service},repositories/{partner_facility_repo,order_assignment_history_repo},api/v1/{routes,controllers}/{facilities,partners},api/v1/controllers/orders,schemas/facilities}.py`) — Phase 9
+
+```text
+POST   /partners/{partner_profile_id}/facilities      -> create (ADMIN)
+GET    /partners/{partner_profile_id}/facilities      -> list a partner's facilities
+GET    /partner-facilities                            -> list all active facilities
+GET    /partner-facilities/{id}                       -> get one
+PATCH  /partner-facilities/{id}                        -> activate/deactivate (ADMIN)
+PATCH  /partners/{partner_profile_id}/status           -> PartnerStatus lifecycle (ADMIN)
+
+POST   /orders/{id}/assign-facility                    -> staff only
+POST   /orders/{id}/assign-pickup-operator             -> staff only
+POST   /orders/{id}/assign-delivery-operator           -> staff only
+GET    /orders/{id}/assignments                        -> own order, or staff
+```
+
+- **`PartnerFacility`** is the model Phase 7's `has_capable_partner`
+  docstring predicted: *"[a real capability check] requires a
+  `PartnerProfile <-> ServiceArea` association that doesn't exist yet
+  ... which is the natural place for that link"* — `service_area_id`
+  here is exactly that association. Establishing it does **not**
+  retroactively make Phase 7's `has_capable_partner` area-scoped
+  (that documented gap still stands, per "do not rewrite existing
+  working code") — this only builds the piece a future enforcement
+  pass would use.
+  - Carries its **own** address columns rather than an FK to
+    `addresses` — deliberately: `Address` (Phase 4) means "one of a
+    *user's own* pickup/delivery addresses," with `AddressService`'s
+    ownership checks built around that framing; a facility's location
+    isn't a user's own address in that sense, so a handful of
+    duplicated columns keeps the two concepts from bleeding together.
+  - `daily_capacity` is **informational only, not enforced anywhere**
+    — the same "documented, not silently wrong" posture as
+    `has_capable_partner` itself. Actual booking capacity remains
+    exclusively `PickupSlot`/`DeliverySlot.capacity_total`'s job
+    (Phase 7); this field never becomes a second, competing source of
+    truth.
+  - Unique on `(partner_profile_id, name)` — a partner can't register
+    two facilities with the same name, but different partners can
+    reuse a name freely.
+- **Assignment is deliberately separate from scheduling** (the spec's
+  own instruction): `Order.assigned_facility_id`/
+  `pickup_operator_user_id`/`delivery_operator_user_id` are independent
+  of `pickup_slot_id`/`delivery_slot_id` — *who* handles an order and
+  *when* it happens don't have to change together.
+  `AssignmentService.assign_facility` validates the facility's
+  `service_area_id` matches the order's own (`422
+  FACILITY_OUTSIDE_SERVICE_AREA` otherwise) — an order's facility can
+  never be somewhere that couldn't have served it in the first place.
+  `assign_pickup_operator`/`assign_delivery_operator` validate the
+  target actually holds a staff role (`RBACService.has_any_role`, `422
+  OPERATOR_MUST_BE_STAFF` otherwise) — a plain customer can never end
+  up as an operator.
+  - **Assigning a pickup/delivery operator for the first time also
+    drives the matching `OrderStatus` transition**
+    (`PICKUP_SCHEDULED -> PICKUP_ASSIGNED` / `READY_FOR_DELIVERY ->
+    DELIVERY_ASSIGNED`), reusing `OrderStateService.transition`
+    directly rather than duplicating any transition logic — the same
+    "one call changes data and moves status" pattern as Phase 8's
+    `schedule_pickup`/`finalize_pricing`. **Reassigning** (the order
+    already past that status) only updates who is assigned; it never
+    tries to re-fire a transition that's no longer legal from wherever
+    the order has since moved to.
+  - **`OrderAssignmentHistory`** mirrors `OrderStatusHistory` exactly
+    (`CreatedAtMixin`, `ON DELETE SET NULL` on the acting user) — every
+    assignment/reassignment is recorded, never silently overwritten.
+    `previous_assignee_id`/`new_assignee_id` are deliberately **plain
+    UUID columns, not foreign keys**: which table an id points into
+    depends on `assignment_role` (a `PartnerFacility` for `FACILITY`,
+    a `User` for either operator role), and a single FK can't target
+    two tables — a real polymorphic-association table would be
+    over-engineering for what is, in practice, always exactly one of
+    two shapes. Authorization for *who may call these endpoints*
+    (staff-only) is enforced at the route layer via `require_any_role`
+    (Phase 8); what `AssignmentService` validates is a business rule
+    about the *target*, not the caller.
+- **`PartnerStatus` onboarding lifecycle** (`ProfileService.
+  update_partner_status`) — Phase 4's own docstring explicitly deferred
+  this ("the full onboarding workflow is Phase 9's job"). Deliberately
+  **not** a validated state machine like `OrderStateService`: an admin
+  may move a partner between `PENDING`/`ACTIVE`/`SUSPENDED`/`INACTIVE`
+  freely. There's no equivalent of "physically already picked up" that
+  would make a move genuinely unsafe, so a full transition graph here
+  would be process for its own sake — a deliberate, documented
+  asymmetry with the order state machine, not an oversight.
+- **Facility inspection extensions** — `OrderItem.condition_notes`/
+  `damage_reported`, settable through the same
+  `OrderService.itemize_order_item` call Phase 8 already exposed
+  (extended, not duplicated). Neither ever feeds into pricing directly
+  — a damaged item still needs a human pricing decision (a discount, a
+  claim, ...), out of scope here; the column only records the
+  observation. `final_line_total`/`final_pricing_rule_id` remain
+  reachable only through `finalize_pricing`'s controlled recomputation
+  — there is still no path for a caller to directly overwrite a
+  finalized price, satisfying the spec's "do not allow arbitrary direct
+  modification of finalized prices."
+- **Not implemented, by design**: `has_capable_partner` is still
+  global, not area-scoped, despite `PartnerFacility` now existing (the
+  Phase 7 gap is *addressable* now, not *closed* — wiring it is a
+  separate, deliberate decision left for whenever booking logic
+  actually needs it); no facility-level capacity *enforcement* (only
+  the informational field); no reassignment notifications; no
+  supervisor-vs-partner permission split (both remain interchangeable
+  "staff" for every order/assignment operation, per Phase 8's own
+  documented gap — still open).
+
 ### Migrations (`core/migrations/`, Alembic)
 - Owned by `core` since models live in `core/models/`. `washy_washy` has no
   migrations folder of its own.
@@ -1035,7 +1140,7 @@ POST   /orders/{id}/finalize-price        -> ADMIN/SUPERVISOR/LAUNDRY_PARTNER on
      two capacity `CHECK` constraints) and `pickup_slot_reservations`/
      `delivery_slot_reservations` (reference their own slot table and
      `users`).
-  9. `964739b60e1b` (head) create orders and state machine tables —
+  9. `964739b60e1b` create orders and state machine tables —
      `orders` (references `users`, `service_areas`, `addresses` x2,
      nullably `pickup_slots`/`delivery_slots`/`pickup_slot_reservations`/
      `delivery_slot_reservations`), then `order_items` (references
@@ -1043,10 +1148,18 @@ POST   /orders/{id}/finalize-price        -> ADMIN/SUPERVISOR/LAUNDRY_PARTNER on
      `material_pricing_rules` x2 — two of these FKs use an explicit
      shortened constraint name, see §6k), then `order_status_history`
      (references `orders` and `users`, the latter `ON DELETE SET NULL`).
+  10. `3b8164c9fa11` (head) add partner operations tables and order
+      assignment columns — `partner_facilities` (references
+      `partner_profiles`/`service_areas`), then `orders.
+      assigned_facility_id`/`pickup_operator_user_id`/
+      `delivery_operator_user_id` (referencing `partner_facilities`/
+      `users`, the latter two `ON DELETE SET NULL`), then
+      `order_items.condition_notes`/`damage_reported`, then
+      `order_assignment_history` (references `orders`/`users`).
   `alembic upgrade head` has been run against real PostgreSQL — both a
   local install and, separately, the `docker-compose` `postgres`
-  container — and verified: all 24 tables exist (`alembic_version` +
-  the 23 above) with the four `RoleName` roles seeded. Every multi-table
+  container — and verified: all 26 tables exist (`alembic_version` +
+  the 25 above) with the four `RoleName` roles seeded. Every multi-table
   revision's full `downgrade` → `upgrade head` round-trip has been run
   and verified at the time it was added (tables dropped cleanly,
   recreated identically) — see §9/§10.
@@ -1466,6 +1579,44 @@ established.
   attempts to cancel the same order: exactly one succeeds, and the
   order ends with exactly one `to_status=CANCELLED` history row no
   matter how the 8 attempts actually interleaved.
+- `unit/test_phase9_models.py` (Phase 9) — no DB required: mapper
+  configuration succeeds, `AssignmentRole` has exactly the three spec'd
+  values, `PartnerFacility` is uniquely constrained on
+  `(partner_profile_id, name)` and defaults `is_active` to `True`,
+  `PartnerFacility.partner_profile_id` cascades while
+  `service_area_id` does not (the ownership-vs-reference split), the
+  three new `Order` assignment columns are nullable with
+  `assigned_facility_id` not cascading while both operator columns are
+  `ON DELETE SET NULL`, `OrderItem.condition_notes`/`damage_reported`
+  exist with the right nullability/default, `OrderAssignmentHistory`
+  has `created_at` but no `updated_at` with the same FK-ondelete split
+  as `OrderStatusHistory`, and `previous_assignee_id`/`new_assignee_id`
+  are confirmed to carry **no** FK constraint (the deliberate
+  polymorphic-reference design decision).
+- `integration/test_partner_facilities.py` (Phase 9) —
+  `PartnerFacilityService`/`ProfileService.update_partner_status`
+  against real PostgreSQL: facility creation, duplicate name for the
+  same partner rejected while a different partner can reuse it,
+  nonexistent partner/service-area both raise `NotFoundException`,
+  listing scopes to one partner's facilities, `set_active`
+  toggles and is correctly excluded from the default (active-only)
+  listing, and the `PartnerStatus` lifecycle moves freely between
+  `PENDING`/`ACTIVE`/`SUSPENDED` with a nonexistent partner raising
+  `NotFoundException`.
+- `integration/test_order_assignment.py` (Phase 9) —
+  `AssignmentService` against real PostgreSQL: assigning a facility
+  records a history row with `previous_assignee_id=None`, reassigning
+  records the prior facility as `previous_assignee_id`, assigning a
+  facility outside the order's own service area raises
+  `BusinessRuleException`, assigning a nonexistent facility raises
+  `NotFoundException`, assigning a non-staff user as pickup operator
+  raises `BusinessRuleException` (`OPERATOR_MUST_BE_STAFF`), assigning
+  a pickup operator while the order is `PICKUP_SCHEDULED` drives the
+  transition to `PICKUP_ASSIGNED` in the same call, reassigning the
+  operator after the order has moved on to `PICKUP_IN_PROGRESS` updates
+  who's assigned **without** trying to re-fire the now-illegal
+  `PICKUP_ASSIGNED` transition, and itemizing an item records
+  `condition_notes`/`damage_reported` correctly.
 
 ## 9. Current status (keep this section accurate)
 
@@ -1478,37 +1629,109 @@ established.
 | `core/models` — catalog | Implemented (Phase 5): `Service`, `Material`, `ServiceMaterial` (+ `care_adjustment` since Phase 6), `PartnerCapability` |
 | `core/models` — pricing | Implemented (Phase 6): `PricingRule`/`PricingModel`, `MaterialPricingRule` |
 | `core/models` — availability/slots | Implemented (Phase 7): `OperatingHours`/`DayOfWeek`, `PartnerAvailability`, `CapacityUnit`, `PickupSlot`, `DeliverySlot`, `PickupSlotReservation`/`ReservationStatus`, `DeliverySlotReservation` |
-| `core/models` — orders | Implemented (Phase 8): `Order`/`OrderStatus`, `OrderItem`, `OrderStatusHistory` — **no payments model yet** (Phase 10) |
+| `core/models` — orders | Implemented (Phase 8): `Order`/`OrderStatus`, `OrderItem`, `OrderStatusHistory` |
+| `core/models` — partner operations | Implemented (Phase 9): `PartnerFacility`, `AssignmentRole`/`OrderAssignmentHistory` — **no payments model yet** (Phase 10) |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
-| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 9 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity → orders). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 24 tables exist, 4 roles seeded, full `pytest` suite (300 tests) passes with 0 skips against it |
-| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability`, `orders` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, most of `availability`, and two `orders` operations require `ADMIN` (or, for orders, any of `ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER`) |
-| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service`, `order_service`, `order_state_service` |
-| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo`, `order_repo`, `order_item_repo`, `order_status_history_repo` |
+| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 10 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity → orders → partner operations). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 26 tables exist, 4 roles seeded, full `pytest` suite (327 tests) passes with 0 skips against it |
+| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability`, `orders`, `partner-facilities`, `partners` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, most of `availability`, most of `partner-facilities`/`partners`, and several `orders` operations require `ADMIN` (or, for orders' operational endpoints, any of `ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER`) |
+| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service`, `order_service`, `order_state_service`, `facility_service`, `assignment_service` |
+| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo`, `order_repo`, `order_item_repo`, `order_status_history_repo`, `partner_facility_repo`, `order_assignment_history_repo` |
 | `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission`, `require_any_role` (Phase 8) — wired since Phase 4 |
-| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 12 tags + response-envelope description) |
+| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 14 tags + response-envelope description) |
 | `washy_washy/utils` | Empty scaffold |
 | Auth (`/auth/register\|login\|refresh`, JWT issuance/verification) | Implemented (Phase 2) |
-| RBAC runtime (`require_role`/`require_permission`/`require_any_role`) | Implemented (Phase 3, extended Phase 8), enforced on `service-areas`/`roles`/`catalog`/`pricing`/`availability`/`orders` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
+| RBAC runtime (`require_role`/`require_permission`/`require_any_role`) | Implemented (Phase 3, extended Phase 8), enforced on `service-areas`/`roles`/`catalog`/`pricing`/`availability`/`orders`/`partner-facilities`/`partners` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
 | Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — an admin cannot revoke their own `ADMIN` role |
 | Catalog (`Service`/`Material`/compatibility/`PartnerCapability`) | Implemented (Phase 5) — `PartnerCapability` has a service layer but no API endpoint yet |
 | Pricing (`PricingRule`/`MaterialPricingRule`/`calculate_price`) | Implemented (Phase 6) — now snapshotted onto `OrderItem` (Phase 8) |
-| Availability (operating hours, partner availability, pickup/delivery slots + race-free capacity reservation) | Implemented (Phase 7) — `has_capable_partner` exists but is a global, unenforced check, not scoped to a service area (see §6j's documented scope gap; real enforcement needs Phase 9's partner↔area link) |
-| Orders (`Order`/`OrderItem`/`OrderStatusHistory`, 24-state machine, concurrency-safe transitions) | Implemented (Phase 8) — no partner-to-order assignment yet (Phase 9), no real payment gateway behind `PENDING_PAYMENT -> CONFIRMED` (Phase 10), no delivery-slot scheduling workflow (columns exist, unpopulated) |
+| Availability (operating hours, partner availability, pickup/delivery slots + race-free capacity reservation) | Implemented (Phase 7) — `has_capable_partner` remains a global, unenforced check; `PartnerFacility` (Phase 9) makes it *addressable* but wiring real area-scoped enforcement is still deferred |
+| Orders (`Order`/`OrderItem`/`OrderStatusHistory`, 24-state machine, concurrency-safe transitions) | Implemented (Phase 8) — no real payment gateway behind `PENDING_PAYMENT -> CONFIRMED` yet (Phase 10), no delivery-slot scheduling workflow (columns exist, unpopulated) |
+| Partner operations (`PartnerFacility`, order assignment/reassignment, `PartnerStatus` lifecycle, facility inspection detail) | Implemented (Phase 9) — no facility-level capacity enforcement (informational field only), no supervisor-vs-partner permission split (still interchangeable "staff") |
 | Payments | Not started |
 | Redis / Celery / APISIX | Not introduced |
-| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 8's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
+| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 9's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
 
 Roadmap (see `README.md` for the full phase list): Phase 0 (foundation) →
 Phase 1A–1D (database + identity/RBAC models) → Phase 2 Authentication →
 Phase 3 RBAC runtime → Phase 4: Users/Profiles/Addresses/Service Areas →
 admin role management addendum → Phase 5: Catalog → Phase 6: Pricing
-Engine → Phase 7: Availability / Slots / Capacity →
-**(this update) Phase 8: Orders / State Machine** → Phase 9 Partner
-Operations → ... → Phase 14 Production/AWS.
+Engine → Phase 7: Availability / Slots / Capacity → Phase 8: Orders /
+State Machine → **(this update) Phase 9: Partner Operations** →
+Phase 10 Payments/Invoices/Refunds → ... → Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-27 (latest)** — Phase 8, Orders / State Machine:
+- **2026-09-27 (latest)** — Phase 9, Partner Operations:
+  - Added `core/models/partner_facility.py` (`PartnerFacility`) and
+    `core/models/order_assignment_history.py` (`AssignmentRole`,
+    `OrderAssignmentHistory`), all registered in
+    `core/models/__init__.py`; extended `core/models/order.py` with
+    `assigned_facility_id`/`pickup_operator_user_id`/
+    `delivery_operator_user_id`, and `core/models/order_item.py` with
+    `condition_notes`/`damage_reported`.
+  - Added Alembic revision `3b8164c9fa11` (head) — `partner_facilities`,
+    the three new `orders` columns + FKs, the two new `order_items`
+    columns, and `order_assignment_history`. Run against live
+    PostgreSQL; `downgrade`/`upgrade` round-trip verified.
+  - Added `washy_washy/repositories/{partner_facility,
+    order_assignment_history}_repo.py`, `washy_washy/services/
+    {facility_service,assignment_service}.py` (reusing Phase 8's
+    `RBACService.has_any_role`); extended `ProfileService` with
+    `update_partner_status`/`get_partner_profile_by_id`,
+    `PartnerProfileRepository` with `update`, and
+    `OrderService.itemize_order_item` with
+    `condition_notes`/`damage_reported`. Added
+    `washy_washy/schemas/facilities.py`, extended
+    `washy_washy/schemas/orders.py` and `schemas/profile.py`
+    (`PartnerProfileResponse`, newly needed since Phase 4 never wired
+    a partner-profile response schema). Added
+    `washy_washy/api/v1/{routes,controllers}/{facilities,partners}.py`
+    and extended `.../orders.py` — `POST/GET /partners/{id}/facilities`,
+    `GET/PATCH /partner-facilities{,/{id}}`, `PATCH
+    /partners/{id}/status`, `POST /orders/{id}/assign-{facility,pickup-
+    operator,delivery-operator}`, `GET /orders/{id}/assignments`.
+    Added `FACILITY_NAME_ALREADY_EXISTS`/`FACILITY_OUTSIDE_SERVICE_AREA`/
+    `OPERATOR_MUST_BE_STAFF` to `error_{codes,messages}.py`; added
+    `partner-facilities`/`partners` tags to `docs/openapi.py`.
+  - **Design decisions** (see §6l for full rationale):
+    `PartnerFacility.service_area_id` is the `PartnerProfile <->
+    ServiceArea` link Phase 7 predicted Phase 9 would add (Phase 7's
+    own `has_capable_partner` gap is now *addressable*, not yet
+    *closed* — that's a separate, deliberate follow-up); `PartnerFacility`
+    carries its own address columns rather than an FK to `addresses`
+    (different ownership framing); `daily_capacity` is informational
+    only, never a second source of truth alongside Phase 7's real slot
+    capacity; assignment is kept independent of scheduling per the
+    spec's own instruction, with the first pickup/delivery operator
+    assignment driving the matching `OrderStatus` transition by reusing
+    `OrderStateService.transition` directly; `OrderAssignmentHistory`'s
+    assignee columns are deliberately unconstrained (polymorphic
+    target, not a real FK); the `PartnerStatus` lifecycle is
+    deliberately *not* a validated state machine, unlike orders.
+  - Added `tests/unit/test_phase9_models.py`,
+    `tests/integration/test_partner_facilities.py`, and
+    `tests/integration/test_order_assignment.py`.
+  - **Not implemented, by design**: `has_capable_partner` still isn't
+    area-scoped (the model now exists to support it, wiring it is a
+    separate decision); no facility-capacity enforcement; no
+    supervisor-vs-partner permission split (Phase 8's own documented
+    gap, still open); no reassignment notifications.
+  - **Verification**: `ruff check .`/`ruff format --check .` clean;
+    `pytest` — **327 passed, 0 failed** against live PostgreSQL (up
+    from 300). Migration round-trip run for real; every new
+    constraint's name length checked against the 63-byte limit before
+    finalizing (all fit without needing an override, unlike Phase 8's
+    two). Live `uvicorn` smoke test: registered an admin, a customer,
+    and a partner; granted roles via direct SQL; activated the
+    partner's `PartnerStatus` and created a facility as admin;
+    confirmed a customer gets `403` assigning a facility to their own
+    order while a `LAUNDRY_PARTNER` succeeds; confirmed assigning a
+    non-staff user as pickup operator is rejected with `422
+    OPERATOR_MUST_BE_STAFF`; confirmed assigning a genuine staff member
+    as pickup operator correctly drove `PICKUP_SCHEDULED ->
+    PICKUP_ASSIGNED` in the same call; confirmed the resulting
+    assignment history was complete and correctly attributed.
+- **2026-09-27** — Phase 8, Orders / State Machine:
   - Added `core/models/{order,order_item,order_status_history}.py`
     (`Order`/`OrderStatus`, `OrderItem`, `OrderStatusHistory`), all
     registered in `core/models/__init__.py`.

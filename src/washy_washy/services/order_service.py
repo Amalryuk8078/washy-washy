@@ -250,9 +250,17 @@ class OrderService:
         verified_material_id: uuid.UUID | None = None,
         verified_quantity: int | None = None,
         verified_weight_kg: Decimal | None = None,
+        condition_notes: str | None = None,
+        damage_reported: bool | None = None,
     ) -> OrderItem:
         """Records the facility's verified material/quantity/weight for
-        one item. Deliberately does not touch the order's own
+        one item, plus (Phase 9) condition/damage observations. Never
+        touches ``final_line_total``/``final_pricing_rule_id`` — those
+        are only ever set by ``finalize_pricing``'s controlled
+        recomputation, so there is no path for a caller to directly
+        overwrite a finalized price through this method, satisfying the
+        spec's "do not allow arbitrary direct modification of finalized
+        prices." Also deliberately does not touch the order's own
         ``status`` -- moving to ``ITEMIZED`` once every item has been
         verified is a separate, explicit ``OrderStateService.transition``
         call, per the spec's "do not mix order item state with order
@@ -269,6 +277,10 @@ class OrderService:
             item.verified_quantity = verified_quantity
         if verified_weight_kg is not None:
             item.verified_weight_kg = verified_weight_kg
+        if condition_notes is not None:
+            item.condition_notes = condition_notes
+        if damage_reported is not None:
+            item.damage_reported = damage_reported
         return await self._order_items.update(item)
 
     async def finalize_pricing(

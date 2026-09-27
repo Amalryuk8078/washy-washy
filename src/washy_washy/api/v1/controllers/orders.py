@@ -13,9 +13,12 @@ from core.models.order import OrderStatus
 from core.models.role import RoleName
 from core.models.user import User
 from washy_washy.schemas.orders import (
+    AssignFacilityRequest,
+    AssignOperatorRequest,
     CreateOrderRequest,
     FinalizePriceRequest,
     ItemizeOrderItemRequest,
+    OrderAssignmentHistoryResponse,
     OrderItemResponse,
     OrderResponse,
     OrderStatusHistoryResponse,
@@ -23,6 +26,7 @@ from washy_washy.schemas.orders import (
     SchedulePickupRequest,
     TransitionOrderRequest,
 )
+from washy_washy.services.assignment_service import AssignmentService
 from washy_washy.services.order_service import OrderItemInput, OrderService
 from washy_washy.services.rbac_service import RBACService
 
@@ -150,6 +154,8 @@ async def itemize_order_item(
         verified_material_id=request.verified_material_id,
         verified_quantity=request.verified_quantity,
         verified_weight_kg=request.verified_weight_kg,
+        condition_notes=request.condition_notes,
+        damage_reported=request.damage_reported,
     )
     await db_session.commit()
     return OrderItemResponse.model_validate(item)
@@ -176,3 +182,61 @@ async def finalize_price(
     )
     await db_session.commit()
     return OrderResponse.model_validate(order)
+
+
+async def assign_facility(
+    order_id: uuid.UUID,
+    current_user: User,
+    request: AssignFacilityRequest,
+    db_session: AsyncSession,
+) -> OrderResponse:
+    service = AssignmentService(db_session)
+    order = await service.assign_facility(
+        order_id, request.facility_id, changed_by_user_id=current_user.id, reason=request.reason
+    )
+    await db_session.commit()
+    return OrderResponse.model_validate(order)
+
+
+async def assign_pickup_operator(
+    order_id: uuid.UUID,
+    current_user: User,
+    request: AssignOperatorRequest,
+    db_session: AsyncSession,
+) -> OrderResponse:
+    service = AssignmentService(db_session)
+    order = await service.assign_pickup_operator(
+        order_id,
+        request.operator_user_id,
+        changed_by_user_id=current_user.id,
+        reason=request.reason,
+    )
+    await db_session.commit()
+    return OrderResponse.model_validate(order)
+
+
+async def assign_delivery_operator(
+    order_id: uuid.UUID,
+    current_user: User,
+    request: AssignOperatorRequest,
+    db_session: AsyncSession,
+) -> OrderResponse:
+    service = AssignmentService(db_session)
+    order = await service.assign_delivery_operator(
+        order_id,
+        request.operator_user_id,
+        changed_by_user_id=current_user.id,
+        reason=request.reason,
+    )
+    await db_session.commit()
+    return OrderResponse.model_validate(order)
+
+
+async def get_assignment_history(
+    order_id: uuid.UUID, current_user: User, db_session: AsyncSession
+) -> list[OrderAssignmentHistoryResponse]:
+    order_service = OrderService(db_session)
+    is_staff = await _is_staff(db_session, current_user.id)
+    await order_service.get_order_for_viewer(order_id, current_user.id, is_staff=is_staff)
+    history = await AssignmentService(db_session).get_history(order_id)
+    return [OrderAssignmentHistoryResponse.model_validate(h) for h in history]

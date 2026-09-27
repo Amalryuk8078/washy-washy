@@ -1,9 +1,9 @@
 """Persistence for :class:`core.models.partner_profile.PartnerProfile`.
 
-Not yet wired to any API endpoint (Phase 4's `4.8 APIs` list doesn't
-include `/partners/me`) — exists so the model/service layer are complete
-and ready, same "build the piece, don't force a premature endpoint"
-pattern as Phase 2/3's `get_current_user`/`require_role`.
+`create`/`get_by_id`/`get_by_user_id` were unwired to any endpoint
+through Phase 8 (Phase 4's own `4.8 APIs` list didn't include
+`/partners/me`) — Phase 9 is the first to actually use `update`, for
+the `PartnerStatus` lifecycle (`PATCH /partners/{id}/status`).
 """
 
 import uuid
@@ -28,5 +28,9 @@ class PartnerProfileRepository:
 
     async def create(self, profile: PartnerProfile) -> PartnerProfile:
         self._session.add(profile)
+        await self._session.flush()
+        return profile
+
+    async def update(self, profile: PartnerProfile) -> PartnerProfile:
         await self._session.flush()
         return profile

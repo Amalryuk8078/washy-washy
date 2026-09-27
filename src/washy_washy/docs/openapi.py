@@ -63,9 +63,21 @@ TAGS_METADATA: list[dict[str, Any]] = [
     {
         "name": "orders",
         "description": "The central order workflow: creation, scheduling, itemization, price "
-        "finalization, and state transitions. Creating/viewing/scheduling/transitioning your "
-        "own order only requires authentication; itemizing an item and finalizing a price "
-        "require `ADMIN`, `SUPERVISOR`, or `LAUNDRY_PARTNER`.",
+        "finalization, assignment, and state transitions. Creating/viewing/scheduling/"
+        "transitioning your own order only requires authentication; itemizing an item, "
+        "finalizing a price, and every assignment operation require `ADMIN`, `SUPERVISOR`, "
+        "or `LAUNDRY_PARTNER`.",
+    },
+    {
+        "name": "partner-facilities",
+        "description": "The physical sites a partner operates from. Reading is open to any "
+        "authenticated caller; creating or activating/deactivating a facility requires the "
+        "`ADMIN` role.",
+    },
+    {
+        "name": "partners",
+        "description": "Partner onboarding — the `PENDING`/`ACTIVE`/`SUSPENDED`/`INACTIVE` "
+        "vetting lifecycle. Updating a partner's status requires the `ADMIN` role.",
     },
     {
         "name": "roles",

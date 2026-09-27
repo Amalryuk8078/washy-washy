@@ -6,8 +6,10 @@ from washy_washy.api.v1.routes import (
     availability,
     catalog,
     customers,
+    facilities,
     health,
     orders,
+    partners,
     pricing,
     roles,
     service_areas,
@@ -26,5 +28,7 @@ api_v1_router.include_router(catalog.router)
 api_v1_router.include_router(pricing.router)
 api_v1_router.include_router(availability.router)
 api_v1_router.include_router(orders.router)
+api_v1_router.include_router(facilities.router)
+api_v1_router.include_router(partners.router)
 
 __all__ = ["api_v1_router"]

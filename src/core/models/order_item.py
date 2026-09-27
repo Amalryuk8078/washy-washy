@@ -14,6 +14,14 @@ confirms during inspection (``OrderService.itemize_order_item``). Both
 sets stay visible after inspection so a customer's original declaration
 is never silently lost.
 
+**Phase 9 addendum — inspection detail.** ``condition_notes``/
+``damage_reported`` are set the same way (``itemize_order_item``), per
+the Phase 9 spec's explicit ask to verify "condition"/"damage" during
+facility inspection, not just quantity/material. Neither ever feeds
+into pricing directly — a damaged item still needs a human pricing
+decision (a discount, a claim, ...), which is out of scope here; this
+column only records the observation.
+
 **Pricing snapshot, not a live recomputation**: ``estimated_pricing_rule_id``/
 ``estimated_material_pricing_rule_id``/``estimated_line_total`` capture
 *which* versioned ``PricingRule``/``MaterialPricingRule`` row (Phase 6)
@@ -40,7 +48,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, Numeric
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database.base import Base
@@ -64,6 +72,10 @@ class OrderItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     declared_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     verified_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     verified_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    condition_notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    damage_reported: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     estimated_pricing_rule_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("pricing_rules.id"), nullable=True

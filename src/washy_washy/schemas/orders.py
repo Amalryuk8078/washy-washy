@@ -46,6 +46,8 @@ class OrderItemResponse(BaseModel):
     final_pricing_rule_id: uuid.UUID | None
     final_material_pricing_rule_id: uuid.UUID | None
     final_line_total: Decimal | None
+    condition_notes: str | None
+    damage_reported: bool
     created_at: datetime
     updated_at: datetime
 
@@ -60,6 +62,9 @@ class OrderResponse(BaseModel):
     delivery_address_id: uuid.UUID
     pickup_slot_id: uuid.UUID | None
     delivery_slot_id: uuid.UUID | None
+    assigned_facility_id: uuid.UUID | None
+    pickup_operator_user_id: uuid.UUID | None
+    delivery_operator_user_id: uuid.UUID | None
     status: str
     estimated_total: Decimal
     final_total: Decimal | None
@@ -85,6 +90,8 @@ class ItemizeOrderItemRequest(BaseModel):
     verified_material_id: uuid.UUID | None = None
     verified_quantity: int | None = None
     verified_weight_kg: Decimal | None = None
+    condition_notes: str | None = None
+    damage_reported: bool | None = None
 
 
 class FinalizePriceRequest(BaseModel):
@@ -105,4 +112,27 @@ class OrderStatusHistoryResponse(BaseModel):
     changed_by_role: str | None
     reason: str | None
     extra_data: dict | None = None
+    created_at: datetime
+
+
+class AssignFacilityRequest(BaseModel):
+    facility_id: uuid.UUID
+    reason: str | None = None
+
+
+class AssignOperatorRequest(BaseModel):
+    operator_user_id: uuid.UUID
+    reason: str | None = None
+
+
+class OrderAssignmentHistoryResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    order_id: uuid.UUID
+    assignment_role: str
+    previous_assignee_id: uuid.UUID | None
+    new_assignee_id: uuid.UUID | None
+    changed_by_user_id: uuid.UUID | None
+    reason: str | None
     created_at: datetime

@@ -1,14 +1,14 @@
-"""Order endpoints: creation, ownership-scoped queries, and the state
+"""Order endpoints: creation, ownership-scoped queries, the state
 machine (scheduling, itemization, price finalization, and generic
-transitions).
+transitions), and (Phase 9) assignment.
 
 Creating an order and viewing/listing/scheduling/transitioning your own
 order only require authentication -- ownership and the customer/staff
 transition split are enforced in ``OrderStateService``/``OrderService``,
-not here (see their module docstrings). Itemizing an item and
-finalizing a price are staff-only (``ADMIN``/``SUPERVISOR``/
-``LAUNDRY_PARTNER``): a customer never verifies their own declared
-material/quantity.
+not here (see their module docstrings). Itemizing an item, finalizing a
+price, and every assignment endpoint are staff-only (``ADMIN``/
+``SUPERVISOR``/``LAUNDRY_PARTNER``): a customer never verifies their
+own declared material/quantity or assigns who handles their order.
 """
 
 import uuid
@@ -24,6 +24,8 @@ from washy_washy.dependencies.auth import get_current_user
 from washy_washy.dependencies.rbac import require_any_role
 from washy_washy.schemas.common import SuccessResponse
 from washy_washy.schemas.orders import (
+    AssignFacilityRequest,
+    AssignOperatorRequest,
     CreateOrderRequest,
     FinalizePriceRequest,
     ItemizeOrderItemRequest,
@@ -128,3 +130,62 @@ async def finalize_price(
 ) -> SuccessResponse:
     order = await orders_controller.finalize_price(order_id, current_user, request, db_session)
     return SuccessResponse(message="Price finalized", data=order)
+
+
+@router.post(
+    "/orders/{order_id}/assign-facility",
+    response_model=SuccessResponse,
+    dependencies=[_staff_only],
+)
+async def assign_facility(
+    order_id: uuid.UUID,
+    request: AssignFacilityRequest,
+    current_user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> SuccessResponse:
+    order = await orders_controller.assign_facility(order_id, current_user, request, db_session)
+    return SuccessResponse(message="Facility assigned", data=order)
+
+
+@router.post(
+    "/orders/{order_id}/assign-pickup-operator",
+    response_model=SuccessResponse,
+    dependencies=[_staff_only],
+)
+async def assign_pickup_operator(
+    order_id: uuid.UUID,
+    request: AssignOperatorRequest,
+    current_user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> SuccessResponse:
+    order = await orders_controller.assign_pickup_operator(
+        order_id, current_user, request, db_session
+    )
+    return SuccessResponse(message="Pickup operator assigned", data=order)
+
+
+@router.post(
+    "/orders/{order_id}/assign-delivery-operator",
+    response_model=SuccessResponse,
+    dependencies=[_staff_only],
+)
+async def assign_delivery_operator(
+    order_id: uuid.UUID,
+    request: AssignOperatorRequest,
+    current_user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> SuccessResponse:
+    order = await orders_controller.assign_delivery_operator(
+        order_id, current_user, request, db_session
+    )
+    return SuccessResponse(message="Delivery operator assigned", data=order)
+
+
+@router.get("/orders/{order_id}/assignments", response_model=SuccessResponse)
+async def get_assignment_history(
+    order_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db_session: AsyncSession = Depends(get_db_session),
+) -> SuccessResponse:
+    history = await orders_controller.get_assignment_history(order_id, current_user, db_session)
+    return SuccessResponse(message="Order assignment history", data=history)
