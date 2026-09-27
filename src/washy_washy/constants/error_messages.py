@@ -28,3 +28,9 @@ SERVICE_AREA_NAME_ALREADY_EXISTS = "A service area with this name already exists
 ROLE_ALREADY_ASSIGNED = "The user already has this role."
 ROLE_NOT_ASSIGNED = "The user does not have this role."
 CANNOT_REMOVE_OWN_ADMIN_ROLE = "You cannot remove your own ADMIN role."
+
+# Catalog (Phase 5)
+SERVICE_NAME_ALREADY_EXISTS = "A service with this name already exists."
+MATERIAL_NAME_ALREADY_EXISTS = "A material with this name already exists."
+SERVICE_MATERIAL_ALREADY_EXISTS = "This service/material compatibility already exists."
+PARTNER_CAPABILITY_ALREADY_EXISTS = "This partner already has this capability."

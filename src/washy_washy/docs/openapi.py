@@ -44,6 +44,11 @@ TAGS_METADATA: list[dict[str, Any]] = [
         "caller; creating a new one requires the `ADMIN` role.",
     },
     {
+        "name": "catalog",
+        "description": "Services, materials, and their compatibility. Reading is open to any "
+        "authenticated caller; writes require the `ADMIN` role.",
+    },
+    {
         "name": "roles",
         "description": "Admin-only role management — granting/revoking roles on other users. "
         "Every operation here requires the `ADMIN` role.",

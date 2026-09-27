@@ -6,12 +6,16 @@ from __future__ import annotations
 
 import enum
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import ForeignKey, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database.base import Base
 from core.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+
+if TYPE_CHECKING:
+    from core.models.partner_capability import PartnerCapability
 
 
 class PartnerStatus(enum.StrEnum):
@@ -50,4 +54,11 @@ class PartnerProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=PartnerStatus.PENDING,
         server_default=PartnerStatus.PENDING.value,
+    )
+
+    capabilities: Mapped[list[PartnerCapability]] = relationship(
+        "PartnerCapability",
+        back_populates="partner_profile",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )

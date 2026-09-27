@@ -1,4 +1,4 @@
-"""HTTP-level tests confirming every Phase 4 endpoint actually requires
+"""HTTP-level tests confirming every Phase 4/5 endpoint actually requires
 authentication. Runs without a database: ``get_current_user`` rejects a
 missing/malformed token before any route handler — and therefore before
 any DB access — runs.
@@ -19,6 +19,11 @@ from httpx import AsyncClient
         ("POST", "/api/v1/addresses"),
         ("GET", "/api/v1/service-areas"),
         ("POST", "/api/v1/service-areas"),
+        ("GET", "/api/v1/roles"),
+        ("GET", "/api/v1/services"),
+        ("POST", "/api/v1/services"),
+        ("GET", "/api/v1/materials"),
+        ("POST", "/api/v1/materials"),
     ],
 )
 async def test_endpoint_rejects_missing_token(client: AsyncClient, method: str, path: str) -> None:

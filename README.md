@@ -1,15 +1,17 @@
 # Washy Washy Backend
 
 FastAPI backend foundation for **Washy Washy**, a laundry-service platform.
-This repository is currently at **Phase 4 — Users / Profiles / Addresses
-/ Service Areas**, built on Phase 0 (HTTP skeleton), Phase 1 (database
-foundation + User identity/RBAC models), Phase 2 (authentication), and
-Phase 3 (`require_role`/`require_permission`). Phase 4 adds
-`CustomerProfile`/`PartnerProfile`/`Address`/`ServiceArea` and — for the
-first time — real protected HTTP endpoints
-(`/users/me`, `/customers/me`, `/addresses`, `/service-areas`) that
-actually consume Phase 2/3's authentication/authorization mechanism.
-See the Roadmap.
+This repository is currently at **Phase 5 — Catalog / Services /
+Materials**, built on Phase 0 (HTTP skeleton), Phase 1 (database +
+identity/RBAC), Phase 2 (authentication), Phase 3
+(`require_role`/`require_permission`), and Phase 4 (users/profiles/
+addresses/service areas — the first protected endpoints). Phase 5 adds
+`Service`/`Material`/their compatibility, and which services a partner
+can perform (`PartnerCapability`) — the catalog, deliberately independent
+of pricing (Phase 6) and availability/capacity (Phase 7). An admin
+role-management API (`/roles`, `/users/{id}/roles`) was also added as a
+small addendum closing a gap Phase 3/4 explicitly deferred. See the
+Roadmap.
 
 ## Overview
 
@@ -83,25 +85,29 @@ washy-washy-backend/
 │   │   ├── logging/         # structured logging setup
 │   │   ├── middleware/      # request-id correlation middleware
 │   │   ├── exceptions/      # AppException family + FastAPI handlers
-│   │   └── migrations/      # Alembic env.py, versions/ (5 revisions so far)
+│   │   └── migrations/      # Alembic env.py, versions/ (6 revisions so far)
 │   │
 │   └── washy_washy/
 │       ├── main.py          # FastAPI app construction
 │       ├── __main__.py      # `python -m washy_washy`
 │       ├── config.py        # service-level Settings(CoreSettings)
 │       ├── api/v1/routes/   # health, auth, users, customers, addresses,
-│       │                    # service_areas, roles
+│       │                    # service_areas, roles, catalog
 │       ├── api/v1/controllers/  # same set
 │       ├── dependencies/    # auth.py: get_current_user
 │       │                    # rbac.py: require_role, require_permission
 │       ├── constants/       # error codes / messages (AUTH_*, profile/
-│       │                    # service-area/role conflict codes)
-│       ├── schemas/         # common, auth, profile, address, service_area, role
+│       │                    # service-area/role/catalog conflict codes)
+│       ├── schemas/         # common, auth, profile, address, service_area,
+│       │                    # role, catalog
 │       ├── repositories/    # user, role, permission, user_role,
 │       │                    # role_permission, customer_profile,
-│       │                    # partner_profile, address, service_area
+│       │                    # partner_profile, address, service_area,
+│       │                    # service, material, service_material,
+│       │                    # partner_capability
 │       ├── services/        # auth_service, rbac_service, profile_service,
-│       │                    # address_service, service_area_service
+│       │                    # address_service, service_area_service,
+│       │                    # catalog_service, partner_capability_service
 │       ├── docs/            # openapi.py (tags + custom_openapi),
 │       │                    # swagger_ui.py (branded /docs, /redoc)
 │       ├── static/          # swagger-custom.css, favicon.svg
@@ -607,6 +613,41 @@ constraint still guards the race). **An admin cannot revoke their own
 admin could accidentally lock everyone, including themselves, out of
 role management; another admin can still revoke it for them.
 
+## Catalog (Phase 5)
+
+```text
+GET/POST /api/v1/services                              -> list (any authenticated caller) / create (ADMIN)
+GET/PATCH /api/v1/services/{id}                          -> get / {"is_active": bool} (ADMIN)
+GET/POST /api/v1/services/{id}/materials                 -> compatible materials / set compatibility (ADMIN)
+DELETE   /api/v1/services/{id}/materials/{material_id}   -> remove compatibility (ADMIN)
+GET/POST /api/v1/materials                              -> list / create (ADMIN)
+GET/PATCH /api/v1/materials/{id}                          -> get / activate/deactivate (ADMIN)
+GET      /api/v1/materials/{id}/services                 -> compatible services
+```
+
+- **`Service`/`Material`** — plain string `name` (unique), not an enum:
+  the business adds new ones over time without a migration. No
+  `ServiceCategory`/hierarchy — the example services (Wash, Dry Clean,
+  Iron, ...) don't naturally group into anything, and unused hierarchy
+  is worse than none (add one later if a real grouping need shows up).
+- **`ServiceMaterial`** — the (service, material) compatibility row,
+  carrying optional `care_instructions`/`max_temperature_celsius`. Uses
+  `TimestampMixin` (mutable), not the association-table pattern from
+  Phase 1 (`CreatedAtMixin` only) — care requirements are real content
+  that gets corrected over time, not a pure yes/no grant.
+  `CatalogService.set_compatibility` creates or updates in place.
+- **Customer-declared vs. facility-verified material** (mentioned in the
+  Phase 5 spec) is deliberately *not* modeled here — that distinction
+  belongs to an `OrderItem` in Phase 8, once orders exist. This table is
+  just the reference vocabulary both of those future fields will point at.
+- **`PartnerCapability`** — which services a partner can perform.
+  Capability only; capacity/scheduling is Phase 7's job. Modeled as an
+  immutable grant (`CreatedAtMixin`, like `UserRole`/`RolePermission`),
+  unlike `ServiceMaterial`. **No API endpoint yet** — `PartnerCapabilityService`
+  exists and is tested, but Phase 5's own endpoint list (`5.7`) doesn't
+  ask for one; same "build the piece, don't force a premature endpoint"
+  pattern as `PartnerProfile` in Phase 4.
+
 ## Database setup / Alembic
 
 Migrations are owned by `core` (models live in `core/models/`); the
@@ -633,10 +674,12 @@ Current revision chain (oldest to newest):
 e8dc958f2e5e  create rbac association tables         (user_roles, role_permissions)
 db9e1e1a26b8  seed foundational roles                (idempotent data seed)
 3587faef9553  create profile and address tables       (customer_profiles, partner_profiles, addresses)
-9ad4f2884494  create service area tables              (service_areas, service_area_postal_codes, head)
+9ad4f2884494  create service area tables              (service_areas, service_area_postal_codes)
+368d5df746fb  create catalog tables                   (services, materials, service_materials,
+                                                        partner_capabilities, head)
 ```
 
-All five were hand-written to match the models exactly (reviewed rather
+All six were hand-written to match the models exactly (reviewed rather
 than a raw `--autogenerate` dump, per the project's migration-safety
 rule). `alembic upgrade head` has been run end-to-end against a real
 PostgreSQL instance (both a local install and, separately, the
@@ -699,8 +742,9 @@ Docker" above, then `alembic upgrade head`) and **skips itself cleanly**
 migrated yet — so `pytest` alone is always self-contained whether or not
 a database is up. Each integration test runs inside its own transaction
 that's rolled back on teardown, so they never leave rows behind. Verified
-end-to-end against a real PostgreSQL instance: **163 passed, 0 skipped,
-0 failed** — reproducibly, from a cold shell with nothing pre-exported.
+end-to-end against a real PostgreSQL instance: **209 passed, 0 skipped,
+0 failed** (up from 163 as of Phase 4) — reproducibly, from a cold shell
+with nothing pre-exported.
 (`tests/conftest.py`'s `DATABASE_URL`/`JWT_SECRET` fallback only applies
 when no `.env` exists — it used to apply unconditionally via
 `os.environ.setdefault`, which shadowed a real `.env`'s password and
@@ -763,8 +807,8 @@ Phase 1C  Role / Permission models
 Phase 1D  UserRole / RolePermission associations
 Phase 2   Authentication (register/login/refresh, JWT, get_current_user)
 Phase 3   RBAC runtime (require_role/require_permission)
-Phase 4   Users / Profiles / Addresses / Service Areas                   ← you are here
-Phase 5   Catalog + Items + Materials
+Phase 4   Users / Profiles / Addresses / Service Areas
+Phase 5   Catalog + Services + Materials                                ← you are here
 Phase 6   Pricing Engine
 Phase 7   Availability + Slots + Capacity
 Phase 8   Orders + State Machine
@@ -776,9 +820,9 @@ Phase 13  Flutter Integration
 Phase 14  Production / AWS
 ```
 
-Phase 4 deliberately stops at the operational user domain: no
-`/partners/me` endpoint (the model/service exist, unexposed), no
-permission-enforcement *middleware* (route-level `dependencies=[...]`
-only), and no availability/slot-capacity enforcement on serviceability
-(that's Phase
-7). Catalog/pricing/orders/payments are not started.
+Phase 5 deliberately stops at the catalog: no pricing (Phase 6), no
+availability/capacity for partner capabilities (Phase 7), no
+`/partners/{id}/capabilities` endpoint (model/service exist, unexposed
+— same pattern as `/partners/me` in Phase 4), and no
+availability/slot-capacity enforcement on serviceability (Phase 7).
+Orders/payments are not started.

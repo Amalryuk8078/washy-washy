@@ -9,19 +9,20 @@
 ## 1. What this is
 
 FastAPI backend for **Washy Washy**, a laundry-service platform. Single
-**modular monolith** (not microservices). Currently at **Phase 4 — Users
-/ Profiles / Addresses / Service Areas**, built on Phase 0 (HTTP
-skeleton), Phase 1 (database foundation + identity/RBAC models), Phase 2
-(authentication), and Phase 3 (`require_role`/`require_permission`).
-Phase 4 adds `CustomerProfile`/`PartnerProfile`/`Address`/`ServiceArea`
-and — for the first time — real protected HTTP endpoints that actually
-consume Phase 2/3's mechanism (`/users/me`, `/customers/me`,
-`/addresses`, `/service-areas` — the last `ADMIN`-gated via
-`require_role`). This environment's database/migrations/Docker have all
-been verified end-to-end against a real PostgreSQL (163/163 tests
-passing, not just "should work") and `/docs`/`/redoc` carry Washy Washy
-branding — see §6e/§6f and the changelog. Other domain features
-(catalog, orders, payments, ...) are not yet implemented.
+**modular monolith** (not microservices). Currently at **Phase 5 —
+Catalog / Services / Materials**, built on Phase 0 (HTTP skeleton),
+Phase 1 (database + identity/RBAC), Phase 2 (authentication), Phase 3
+(`require_role`/`require_permission`), and Phase 4 (users/profiles/
+addresses/service areas — the first protected endpoints). Phase 5 adds
+`Service`/`Material`/their compatibility and `PartnerCapability`
+(which services a partner can perform) — deliberately independent of
+pricing (Phase 6) and availability/capacity (Phase 7). An admin
+role-management API (`/roles`, `/users/{id}/roles`) was added as a
+small addendum between Phase 4 and 5, closing a gap those phases
+explicitly deferred. This environment's database/migrations/Docker have
+all been verified end-to-end against a real PostgreSQL (209/209 tests
+passing) and `/docs`/`/redoc` carry Washy Washy branding — see §6e–§6h
+and the changelog. Orders/payments are not yet implemented.
 
 Target system context (only FastAPI + PostgreSQL exist today; the rest are
 future phases):
@@ -616,6 +617,79 @@ exactly); it was confirmed to fail with the same `MissingGreenlet` error
 when temporarily run against the pre-fix code, then confirmed to pass
 against the fix, before being left in place.
 
+### 6g. Admin role management (`washy_washy/{api/v1/{routes,controllers}/roles,schemas/role}.py`) — post-Phase-4 addendum
+
+Closes a gap Phase 3/4 explicitly deferred ("no admin API for managing
+role assignments"). `GET /roles`, `GET/POST /users/{id}/roles`,
+`DELETE /users/{id}/roles/{name}` — all `ADMIN`-only via a
+router-level `dependencies=[Depends(require_role(RoleName.ADMIN.value))]`.
+Logic in `RBACService.{list_assignable_roles,get_user,get_user_by_email,
+grant_role_by_name,revoke_role_by_name}`. Existence is pre-checked for a
+clean 409/404 (granting a duplicate / revoking an unassigned role), with
+the DB's `(user_id, role_id)` unique constraint as the final race guard,
+same pattern as everywhere else. **An admin cannot revoke their own
+`ADMIN` role** (`BusinessRuleException`/`CANNOT_REMOVE_OWN_ADMIN_ROLE`)
+— a different admin still can, so this only prevents accidental
+self-lockout, not a real block on removing a rogue admin.
+
+This work, plus a `RequestValidationError` handler improvement (returns
+structured per-field errors instead of a bare message, deliberately
+excluding Pydantic's raw `input`/`ctx` since those can leak secrets or
+hold non-serializable objects), was found already drafted but
+uncommitted from an interrupted prior session and finished here rather
+than discarded.
+
+**Pre-commit installed** per explicit request: `.pre-commit-config.yaml`
+(check-yaml, end-of-file-fixer, trailing-whitespace, detect-private-key,
+pretty-format-json, ruff, ruff-format), hook active at
+`.git/hooks/pre-commit`, added to `pyproject.toml` dev deps.
+
+### 6h. Catalog (`washy_washy/{services/{catalog_service,partner_capability_service},repositories/{service_repo,material_repo,service_material_repo,partner_capability_repo},api/v1/{routes,controllers}/catalog,schemas/catalog}.py`) — Phase 5
+
+```text
+GET/POST /services, GET/PATCH /services/{id}                    -> Service CRUD + activate/deactivate
+GET/POST /services/{id}/materials, DELETE .../materials/{mid}   -> compatibility
+GET/POST /materials, GET/PATCH /materials/{id}                  -> Material CRUD + activate/deactivate
+GET      /materials/{id}/services                                -> reverse compatibility lookup
+```
+
+All reads require only `get_current_user`; all writes additionally
+require `require_role(RoleName.ADMIN.value)` — same router-level
+`dependencies=[...]` pattern as `service-areas`/`roles`.
+
+- **`Service`/`Material`** — plain string `name` (unique), no enum, no
+  `ServiceCategory`. The example services (Wash, Dry Clean, Iron, Wash +
+  Iron, Express) don't naturally group into anything, and the spec's own
+  guidance is to avoid unnecessary hierarchy — add one later only if a
+  real grouping need appears.
+- **`ServiceMaterial`** uses `TimestampMixin` (mutable, has
+  `updated_at`) — a deliberate departure from the Phase 1 association-
+  table pattern (`CreatedAtMixin` only, immutable). Care instructions
+  and max temperature are real content that gets corrected over time,
+  not a pure yes/no grant like `UserRole`. `CatalogService.
+  set_compatibility` creates the row or updates it in place; there's no
+  separate "update" vs. "create" call for a caller to get wrong.
+- The Phase 5 spec's "customer-declared vs. facility-verified material"
+  distinction (final pricing only after inspection) is **not** modeled
+  here on purpose — that's an `OrderItem` field pair for Phase 8. This
+  table is only the shared vocabulary those future fields will
+  reference.
+- **`PartnerCapability`** — which services a partner can perform,
+  capability only (no capacity/scheduling — Phase 7). Modeled as an
+  immutable grant (`CreatedAtMixin`, `ON DELETE CASCADE` both ways,
+  parent → grant only) — the opposite mutability choice from
+  `ServiceMaterial`, and deliberately so: a partner either can perform a
+  service or can't, no in-between state to edit.
+  **No API endpoint** — `PartnerCapabilityService` exists and is fully
+  tested, but Phase 5's own endpoint list (§5.7) doesn't ask for one;
+  same "build the piece, don't force a premature endpoint" pattern as
+  `PartnerProfile` in Phase 4.
+- Constraint/index name lengths were checked against PostgreSQL's
+  63-byte identifier limit before naming the table
+  `partner_capabilities` — an earlier working name,
+  `partner_service_capabilities`, would have produced a 63-byte unique
+  constraint name, uncomfortably exactly at the limit.
+
 ### Migrations (`core/migrations/`, Alembic)
 - Owned by `core` since models live in `core/models/`. `washy_washy` has no
   migrations folder of its own.
@@ -630,7 +704,7 @@ against the fix, before being left in place.
 - `script.py.mako` generates modern-style revision files
   (`str | None`, `from collections.abc import Sequence`) so every future
   `alembic revision` output passes this project's ruff config as-is.
-- Five revisions exist, in this order (each hand-written to match the
+- Six revisions exist, in this order (each hand-written to match the
   models exactly rather than trusted from a raw `--autogenerate` dump —
   reviewed per the project's migration-safety rule):
   1. `0a91544a311e` create identity and rbac core tables — `users`,
@@ -647,16 +721,20 @@ against the fix, before being left in place.
      `partner_profiles`, `addresses` (all independently reference only
      `users`, so they share a revision). Includes the partial unique
      index on `addresses (user_id) WHERE is_default = true`.
-  5. `9ad4f2884494` (head) create service area tables — `service_areas`,
+  5. `9ad4f2884494` create service area tables — `service_areas`,
      `service_area_postal_codes` (the latter references the former, so
      it must come second within this revision).
+  6. `368d5df746fb` (head) create catalog tables — `services`,
+     `materials` (independent parents), then `service_materials`
+     (references both) and `partner_capabilities` (references
+     `services` and the existing `partner_profiles`).
   `alembic upgrade head` has been run against real PostgreSQL — both a
   local install and, separately, the `docker-compose` `postgres`
-  container — and verified: all 11 tables exist (`alembic_version` +
-  the 10 above) with the four `RoleName` roles seeded. Revisions #4/#5's
-  full `downgrade -2` → `upgrade head` round-trip was also run and
-  verified: all 5 Phase 4 tables (plus their indexes) dropped cleanly,
-  then recreated identically — see §9/§10.
+  container — and verified: all 15 tables exist (`alembic_version` +
+  the 14 above) with the four `RoleName` roles seeded. Every multi-table
+  revision's full `downgrade` → `upgrade head` round-trip has been run
+  and verified at the time it was added (tables dropped cleanly,
+  recreated identically) — see §9/§10.
 - `alembic heads` runs cleanly with no DB connection required;
   `alembic current`/`upgrade`/`downgrade`/`revision --autogenerate`
   require a reachable PostgreSQL instance.
@@ -949,6 +1027,26 @@ established.
   `NotFoundException`; an admin cannot revoke their own `ADMIN` role but
   a *different* admin can; `get_user`/`get_user_by_email` round-trip and
   404 when not found.
+- `unit/test_phase5_models.py` (Phase 5) — no DB required: `Service`/
+  `Material` name uniqueness and `is_active` default, `ServiceMaterial`
+  uniqueness on `(service_id, material_id)` and that it *has*
+  `updated_at` (the deliberate mutability departure — see §6h),
+  `PartnerCapability` uniqueness on `(partner_profile_id, service_id)`
+  and that it does *not* have `updated_at`, and `ON DELETE CASCADE` on
+  every FK in both tables.
+- `integration/test_catalog.py` (Phase 5) — `CatalogService` against
+  real PostgreSQL: service/material creation + duplicate-name rejection
+  + not-found, activation/deactivation, `list_services`/`list_materials`
+  excluding inactive by default, setting compatibility twice updates the
+  same row in place (not a duplicate) and its care metadata changes,
+  compatibility for a nonexistent service/material raises
+  `NotFoundException`, removing compatibility, and an unset pair reports
+  not compatible. `PartnerCapabilityService`: grant/check/list, duplicate
+  grant rejected, revoke, and granting for a nonexistent partner profile
+  or service raises `NotFoundException`.
+- `api/test_protected_routes_require_auth.py` extended with the new
+  `/roles`, `/services`, `/materials` paths (Phase 5) — still no DB
+  required, same reasoning as Phase 4's version of this file.
 
 ## 9. Current status (keep this section accurate)
 
@@ -957,31 +1055,70 @@ established.
 | `core/config`, `core/database`, `core/dependencies`, `core/logging`, `core/middleware`, `core/exceptions`, `core/security` | Implemented |
 | `core/models` — infrastructure | Implemented (naming convention, `UUIDPrimaryKeyMixin`, `CreatedAtMixin`, `TimestampMixin`) |
 | `core/models` — identity/RBAC | Implemented: `User`, `Role`/`RoleName`, `Permission`/`PermissionScope`, `UserRole`, `RolePermission` |
-| `core/models` — operational user domain | Implemented (Phase 4): `CustomerProfile`, `PartnerProfile`/`PartnerStatus`, `Address`/`AddressLabel`, `ServiceArea`, `ServiceAreaPostalCode` — **no other domain models yet** (catalog, orders, payments, ... are later phases) |
+| `core/models` — operational user domain | Implemented (Phase 4): `CustomerProfile`, `PartnerProfile`/`PartnerStatus`, `Address`/`AddressLabel`, `ServiceArea`, `ServiceAreaPostalCode` |
+| `core/models` — catalog | Implemented (Phase 5): `Service`, `Material`, `ServiceMaterial`, `PartnerCapability` — **no other domain models yet** (orders, payments, ... are later phases) |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
-| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 5 revisions (identity+RBAC core tables → RBAC associations → seed foundational roles → profile/address tables → service area tables). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 11 tables exist, 4 roles seeded, full `pytest` suite (163 tests) passes with 0 skips against it |
-| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles` (routes + controllers) — most endpoints now require authentication; `POST /service-areas` and all of `roles` require `ADMIN` |
-| `washy_washy/services` | Implemented: `auth_service.py` (`AuthService`), `rbac_service.py` (`RBACService`), `profile_service.py` (`ProfileService`), `address_service.py` (`AddressService`), `service_area_service.py` (`ServiceAreaService`) |
-| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo` |
-| `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission` — **now wired** (Phase 4: every new route except `GET /service-areas` uses `get_current_user`; `POST /service-areas` also uses `require_role`) |
-| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc` (custom CSS + favicon + header, layered on stock swagger-ui-dist/ReDoc), `custom_openapi` (tag metadata for all 7 tags + response-envelope description). OpenAPI now shows the `HTTPBearer` "Authorize" padlock on every Phase 4 operation (auto-added by FastAPI once a route depends on `get_current_user`) |
+| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 6 revisions (identity+RBAC core tables → RBAC associations → seed foundational roles → profile/address tables → service area tables → catalog tables). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 15 tables exist, 4 roles seeded, full `pytest` suite (209 tests) passes with 0 skips against it |
+| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, and `catalog` require `ADMIN` |
+| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service` |
+| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo` |
+| `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission` — wired since Phase 4 |
+| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 9 tags + response-envelope description) |
 | `washy_washy/utils` | Empty scaffold |
 | Auth (`/auth/register\|login\|refresh`, JWT issuance/verification) | Implemented (Phase 2) |
-| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), **enforced since Phase 4** on `POST /service-areas` and, as of this update, all of `/roles`/`/users/{id}/roles`; no authorization *middleware* (route-level `dependencies=[...]` only) |
-| Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — `RBACService.{list_assignable_roles,get_user,get_user_by_email,grant_role_by_name,revoke_role_by_name}`; an admin cannot revoke their own `ADMIN` role |
-| Catalog / Pricing / Orders / Payments | Not started |
+| RBAC runtime (`require_role`/`require_permission`) | Implemented (Phase 3), enforced on `service-areas`/`roles`/`catalog` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
+| Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — an admin cannot revoke their own `ADMIN` role |
+| Catalog (`Service`/`Material`/compatibility/`PartnerCapability`) | Implemented (Phase 5) — `PartnerCapability` has a service layer but no API endpoint yet |
+| Pricing / Orders / Payments | Not started |
 | Redis / Celery / APISIX | Not introduced |
-| Docker (`docker compose up --build`) | **Verified**, including with Phase 4's changes: rebuilt (`docker compose up -d --build`), `alembic upgrade head` run inside the `api` container, registration/full address flow hit through the container on port `8080` and worked correctly (including the `eager_defaults` fix). Two infra bugs (Docker Desktop's WSL2 networking, `.dockerignore` excluding `tests/`/`README.md`) were found and fixed in an earlier update — see the changelog below. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again since (same root cause, not a new bug). |
+| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 5's changes (rebuilt, migrated inside the container, hit through port `8080`). Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
 
 Roadmap (see `README.md` for the full phase list): Phase 0 (foundation) →
 Phase 1A–1D (database + identity/RBAC models) → Phase 2 Authentication →
 Phase 3 RBAC runtime → Phase 4: Users/Profiles/Addresses/Service Areas →
-**(this update) admin role management** → Phase 5 Catalog → ... →
-Phase 14 Production/AWS.
+admin role management addendum → **(this update) Phase 5: Catalog** →
+Phase 6 Pricing → ... → Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-27 (latest)** — Admin role management API (closes a gap
+- **2026-09-27 (latest)** — Phase 5, Catalog / Services / Materials:
+  - Added `core/models/{service,material,service_material,
+    partner_capability}.py`, all registered in `core/models/__init__.py`;
+    added the back-reference relationship on `PartnerProfile`.
+  - Added Alembic revision `368d5df746fb` (head) — `services`,
+    `materials`, `service_materials`, `partner_capabilities`. Run
+    against live PostgreSQL; `downgrade`/`upgrade` round-trip verified.
+  - Added `washy_washy/repositories/{service,material,service_material,
+    partner_capability}_repo.py`,
+    `washy_washy/services/{catalog_service,partner_capability_service}.py`,
+    `washy_washy/schemas/catalog.py`,
+    `washy_washy/api/v1/{routes,controllers}/catalog.py` — `GET/POST
+    /services`, `GET/PATCH /services/{id}`, `GET/POST
+    /services/{id}/materials`, `DELETE .../materials/{mid}`, `GET/POST
+    /materials`, `GET/PATCH /materials/{id}`, `GET
+    /materials/{id}/services`. Added `SERVICE_NAME_ALREADY_EXISTS`/
+    `MATERIAL_NAME_ALREADY_EXISTS`/`SERVICE_MATERIAL_ALREADY_EXISTS`/
+    `PARTNER_CAPABILITY_ALREADY_EXISTS` to `error_{codes,messages}.py`.
+  - **Design decisions** (see §6h for the full rationale): no
+    `ServiceCategory` (no real grouping need); `ServiceMaterial` uses
+    `TimestampMixin` (mutable care metadata) while `PartnerCapability`
+    uses `CreatedAtMixin` (pure grant) — a deliberate split, not an
+    inconsistency; customer-declared-vs-verified material is explicitly
+    deferred to Phase 8's `OrderItem`; table renamed
+    `partner_capabilities` (from a draft `partner_service_capabilities`)
+    after checking constraint-name length against PostgreSQL's 63-byte
+    identifier limit.
+  - Added `tests/unit/test_phase5_models.py`,
+    `tests/integration/test_catalog.py`; extended
+    `tests/api/test_protected_routes_require_auth.py` with the new paths.
+  - **Not implemented, by design**: no `PartnerCapability` API endpoint
+    (service layer exists, tested, unexposed — Phase 5's own endpoint
+    list doesn't ask for one), no pricing, no availability/capacity.
+  - **Verification**: `ruff check .` clean; `pytest` — **209 passed, 0
+    failed** against live PostgreSQL (up from 175). Live `uvicorn`
+    smoke test: a non-admin authenticated user gets `403` creating a
+    service but `200`s listing them.
+- **2026-09-27** — Admin role management API (closes a gap
   Phase 3/4 explicitly left open):
   - Added `RBACService.{list_assignable_roles,get_user,get_user_by_email,
     grant_role_by_name,revoke_role_by_name}`; `washy_washy/schemas/role.py`

@@ -18,6 +18,9 @@ class PartnerProfileRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, partner_profile_id: uuid.UUID) -> PartnerProfile | None:
+        return await self._session.get(PartnerProfile, partner_profile_id)
+
     async def get_by_user_id(self, user_id: uuid.UUID) -> PartnerProfile | None:
         stmt = select(PartnerProfile).where(PartnerProfile.user_id == user_id)
         result = await self._session.execute(stmt)
