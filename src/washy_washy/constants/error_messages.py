@@ -61,3 +61,16 @@ FACILITY_OUTSIDE_SERVICE_AREA = "This facility is not in the order's service are
 OPERATOR_MUST_BE_STAFF = (
     "The assigned user must hold a staff role (ADMIN, SUPERVISOR, or LAUNDRY_PARTNER)."
 )
+
+# Payments / invoices / refunds (Phase 10)
+ORDER_NOT_PRICE_FINALIZED = "An invoice can only be created once the order's price is finalized."
+INVOICE_ALREADY_EXISTS = "An invoice already exists for this order."
+INVOICE_NOT_DRAFT = "This operation is only allowed while the invoice is still in DRAFT."
+INVOICE_NOT_PAYABLE = "This invoice is not in a payable state."
+INVOICE_HAS_PAYMENTS = "This invoice cannot be voided because it already has payments applied."
+PAYMENT_AMOUNT_EXCEEDS_BALANCE = "This amount exceeds the invoice's remaining balance."
+PAYMENT_NOT_CHARGEABLE = "This payment is not in a chargeable state."
+PAYMENT_NOT_REFUNDABLE = "This payment has no captured amount available to refund."
+REFUND_EXCEEDS_CAPTURED_AMOUNT = "This refund would exceed the payment's captured amount."
+WEBHOOK_UNAUTHORIZED = "The webhook request could not be authenticated."
+UNKNOWN_PAYMENT_REFERENCE = "No payment matches the provider reference in this event."

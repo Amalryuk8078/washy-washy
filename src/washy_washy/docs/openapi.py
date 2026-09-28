@@ -80,6 +80,14 @@ TAGS_METADATA: list[dict[str, Any]] = [
         "vetting lifecycle. Updating a partner's status requires the `ADMIN` role.",
     },
     {
+        "name": "payments",
+        "description": "Invoices, payments, and refunds. Viewing an invoice/payment and "
+        "initiating/charging a payment only require owning the underlying order (or staff); "
+        "creating/finalizing/voiding an invoice and issuing a refund require `ADMIN`, "
+        "`SUPERVISOR`, or `LAUNDRY_PARTNER`. The webhook endpoint authenticates via a shared "
+        "secret header, not a user token.",
+    },
+    {
         "name": "roles",
         "description": "Admin-only role management — granting/revoking roles on other users. "
         "Every operation here requires the `ADMIN` role.",

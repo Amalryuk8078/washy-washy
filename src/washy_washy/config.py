@@ -30,6 +30,8 @@ class Settings(CoreSettings):
 
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
+    payment_webhook_secret: str = "change_me"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

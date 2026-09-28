@@ -1,16 +1,20 @@
 # Washy Washy Backend
 
 FastAPI backend foundation for **Washy Washy**, a laundry-service platform.
-This repository is currently at **Phase 9 — Partner Operations**, built
-on Phase 0–8 (HTTP skeleton, auth, RBAC, users/profiles/addresses/
-service areas, catalog, pricing, availability/slots/capacity, orders/
-state machine). Phase 9 adds `PartnerFacility` (finally linking a
-partner to a service area, closing a gap Phase 7 explicitly deferred),
-order assignment (facility/pickup operator/delivery operator, kept
-deliberately separate from scheduling and fully audited in
-`OrderAssignmentHistory`), the `PartnerStatus` onboarding lifecycle, and
-facility-inspection detail (condition/damage) on order items. An admin
-role-management API (`/roles`, `/users/{id}/roles`) was added as a
+This repository is currently at **Phase 10 — Payments / Invoices /
+Refunds**, built on Phase 0–9 (HTTP skeleton, auth, RBAC, users/
+profiles/addresses/service areas, catalog, pricing, availability/slots/
+capacity, orders/state machine, partner operations). Phase 10 adds
+`Invoice`/`Payment`/`Refund` with a strict `ORDER` (workflow) /
+`INVOICE` (amount owed) / `PAYMENT` (money collected) / `REFUND` (money
+returned) separation. Every money amount is guarded by the same
+**race-free atomic `UPDATE`** pattern Phase 7 introduced for slot
+capacity — an invoice can never be recorded as overpaid, and a payment
+can never be refunded past what it actually captured. A `PaymentGateway`
+abstraction keeps the domain independent of any concrete provider, and
+webhook processing is idempotent via a real database unique constraint,
+with webhooks treated as authoritative for final payment status. An
+admin role-management API (`/roles`, `/users/{id}/roles`) was added as a
 small addendum between Phase 4 and 5, closing a gap those phases
 explicitly deferred. See the Roadmap.
 
@@ -88,13 +92,14 @@ washy-washy-backend/
 │   │   │                    # PickupSlotReservation, DeliverySlotReservation,
 │   │   │                    # Order, OrderItem, OrderStatusHistory,
 │   │   │                    # PartnerFacility, AssignmentRole,
-│   │   │                    # OrderAssignmentHistory
+│   │   │                    # OrderAssignmentHistory, Invoice, InvoiceItem,
+│   │   │                    # Payment, PaymentAttempt, PaymentEvent, Refund
 │   │   ├── security/        # password hashing, JWT encode/decode
 │   │   ├── dependencies/    # get_db_session
 │   │   ├── logging/         # structured logging setup
 │   │   ├── middleware/      # request-id correlation middleware
 │   │   ├── exceptions/      # AppException family + FastAPI handlers
-│   │   └── migrations/      # Alembic env.py, versions/ (10 revisions so far)
+│   │   └── migrations/      # Alembic env.py, versions/ (11 revisions so far)
 │   │
 │   └── washy_washy/
 │       ├── main.py          # FastAPI app construction
@@ -102,17 +107,19 @@ washy-washy-backend/
 │       ├── config.py        # service-level Settings(CoreSettings)
 │       ├── api/v1/routes/   # health, auth, users, customers, addresses,
 │       │                    # service_areas, roles, catalog, pricing,
-│       │                    # availability, orders, facilities, partners
+│       │                    # availability, orders, facilities, partners,
+│       │                    # payments
 │       ├── api/v1/controllers/  # same set
 │       ├── dependencies/    # auth.py: get_current_user
 │       │                    # rbac.py: require_role, require_permission,
 │       │                    # require_any_role
 │       ├── constants/       # error codes / messages (AUTH_*, profile/
 │       │                    # service-area/role/catalog/pricing/
-│       │                    # availability/order/partner conflict codes)
+│       │                    # availability/order/partner/payment conflict
+│       │                    # codes)
 │       ├── schemas/         # common, auth, profile, address, service_area,
 │       │                    # role, catalog, pricing, availability, orders,
-│       │                    # facilities
+│       │                    # facilities, payments
 │       ├── repositories/    # user, role, permission, user_role,
 │       │                    # role_permission, customer_profile,
 │       │                    # partner_profile, address, service_area,
@@ -123,13 +130,17 @@ washy-washy-backend/
 │       │                    # delivery_slot, pickup_slot_reservation,
 │       │                    # delivery_slot_reservation, order, order_item,
 │       │                    # order_status_history, partner_facility,
-│       │                    # order_assignment_history
+│       │                    # order_assignment_history, invoice,
+│       │                    # invoice_item, payment, payment_attempt,
+│       │                    # payment_event, refund
 │       ├── services/        # auth_service, rbac_service, profile_service,
 │       │                    # address_service, service_area_service,
 │       │                    # catalog_service, partner_capability_service,
 │       │                    # pricing_service, availability_service,
 │       │                    # order_service, order_state_service,
-│       │                    # facility_service, assignment_service
+│       │                    # facility_service, assignment_service,
+│       │                    # invoice_service, payment_service,
+│       │                    # payment_gateway
 │       ├── docs/            # openapi.py (tags + custom_openapi),
 │       │                    # swagger_ui.py (branded /docs, /redoc)
 │       ├── static/          # swagger-custom.css, favicon.svg
@@ -143,8 +154,8 @@ washy-washy-backend/
     │                        # test_rbac_models, test_auth_tokens_and_schemas,
     │                        # test_phase4_models, test_phase5_models,
     │                        # test_phase6_models, test_phase7_models,
-    │                        # test_phase8_models, test_phase9_models
-    │                        # (no DB required)
+    │                        # test_phase8_models, test_phase9_models,
+    │                        # test_phase10_models (no DB required)
     ├── integration/         # test_database_connection, test_user_identity,
     │                        # test_rbac_associations, test_auth,
     │                        # test_rbac_runtime, test_profiles,
@@ -152,7 +163,8 @@ washy-washy-backend/
     │                        # test_catalog, test_pricing, test_availability,
     │                        # test_availability_concurrency, test_orders,
     │                        # test_order_state_machine,
-    │                        # test_partner_facilities, test_order_assignment
+    │                        # test_partner_facilities, test_order_assignment,
+    │                        # test_invoices, test_payments
     │                        # (require a live, migrated DB)
     └── api/                 # test_auth_routes, test_protected_routes_require_auth
                               # (HTTP-level, validation-only, no DB)
@@ -216,6 +228,8 @@ JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
 CORS_ORIGINS=http://localhost:3000,http://localhost:5173
 
 LOG_LEVEL=INFO
+
+PAYMENT_WEBHOOK_SECRET=change_me
 ```
 
 ## Installation
@@ -904,6 +918,83 @@ GET    /api/v1/orders/{id}/assignments                -> own order, or staff
   facility-capacity *enforcement*; no supervisor-vs-partner permission
   split (both remain interchangeable "staff" for every order operation).
 
+## Payments / Invoices / Refunds (Phase 10)
+
+```text
+POST   /api/v1/orders/{id}/invoice        -> create from a PRICE_FINALIZED order (staff)
+GET    /api/v1/orders/{id}/invoice        -> own order, or staff
+GET    /api/v1/invoices/{id}               -> own order, or staff
+POST   /api/v1/invoices/{id}/finalize      -> staff only
+POST   /api/v1/invoices/{id}/void          -> staff only, only while unpaid
+POST   /api/v1/invoices/{id}/payments      -> own order, or staff
+POST   /api/v1/payments/{id}/charge        -> own order, or staff
+GET    /api/v1/payments/{id}                -> own order, or staff
+POST   /api/v1/payments/{id}/refunds        -> staff only
+GET    /api/v1/payments/{id}/refunds        -> own order, or staff
+POST   /api/v1/webhooks/payments             -> gateway-authenticated, not a user
+```
+
+Strict separation, per the spec's own framing: `ORDER` is operational
+workflow (Phase 8), `INVOICE` is amount owed, `PAYMENT` is money
+collected, `REFUND` is money returned. `InvoiceService`/`PaymentService`
+only ever *read* an already-`PRICE_FINALIZED` order's items — neither
+depends on `OrderStateService`, and neither can change an order's own
+status.
+
+- **`Invoice`/`InvoiceItem`** — one invoice per order (`UNIQUE` on
+  `order_id`, `ON DELETE CASCADE`). `InvoiceItem` snapshots each order
+  item's already-settled `final_line_total` (Phase 8) at creation time.
+  **"Immutable after finalization" is enforced by omission**: no
+  method anywhere can alter `subtotal`/`tax`/`discount`/`total` once
+  `status` leaves `DRAFT` — there's nothing to "silently mutate"
+  because nothing *can* mutate it.
+- **Race-free money, the same pattern as Phase 7's slot capacity**:
+  `Invoice.amount_paid` and `Payment.captured_amount`/`refunded_amount`
+  are only ever changed via single atomic conditional `UPDATE`
+  statements (`InvoiceRepository.try_apply_payment`,
+  `PaymentRepository.try_capture`/`try_refund`) — never a
+  read-then-write. This is the concrete mechanism behind "never refund
+  more than the captured amount": the check and the increment happen
+  in the same statement, so concurrent refund requests can never both
+  succeed past what was actually captured.
+- **`Payment`/`PaymentAttempt`/`PaymentEvent`** — three tables matching
+  the spec's own vocabulary: `Payment` is the logical payment and its
+  aggregate outcome; `PaymentAttempt` is one try at charging (mutable,
+  resolves `PENDING -> CAPTURED`/`FAILED` in place — a retry is a new
+  row, not a mutation); `PaymentEvent` is a permanent, append-only
+  audit log, primarily of webhook deliveries.
+  - **Webhook idempotency is a real database constraint**:
+    `PaymentEvent.provider_event_id` is `UNIQUE`. A gateway redelivering
+    the same webhook produces a duplicate insert the constraint
+    rejects — not just an application-level check.
+  - **Webhooks are authoritative for final status** (the spec's own
+    words): a webhook can move a payment to `CAPTURED`/`FAILED`
+    independent of whatever the synchronous charge call already set. A
+    client-side "it succeeded" is never trusted on its own.
+- **`PaymentGateway`** — an abstract interface (`charge`/`refund`) plus
+  `ManualPaymentGateway`, a deterministic, always-succeeds
+  implementation for this project's own dev/test use — never a
+  concrete Stripe/Razorpay/etc. integration wired into business logic.
+  Swapping in a real provider later means writing one more class here,
+  never touching `PaymentService`.
+- **`Refund`** — reserves capacity via `try_refund` *before* calling
+  the gateway; if the gateway declines, the reservation is released and
+  a `FAILED` refund is still recorded (a declined refund is a fact
+  worth keeping). A successful refund releases the amount back off the
+  invoice and recomputes its status (`PAID`/`PARTIALLY_PAID`/
+  `FINALIZED`).
+- **The webhook endpoint doesn't use `Authorization: Bearer`** — a
+  gateway has no user account here. It's authenticated by a shared
+  secret header (`X-Webhook-Secret`, checked against the new
+  `PAYMENT_WEBHOOK_SECRET` setting) — a deliberately simple stand-in
+  for a real provider's own signature scheme.
+- **Not implemented, by design**: no real payment gateway SDK
+  integration; no separate `InvoiceAdjustment`/credit-note model (the
+  spec's own "where appropriate" softened that requirement, and
+  `Refund` covers the primary correction path); `PENDING_PAYMENT ->
+  CONFIRMED` is still a plain staff-triggered flip, not automatically
+  driven by a captured payment.
+
 ## Database setup / Alembic
 
 Migrations are owned by `core` (models live in `core/models/`); the
@@ -944,21 +1035,23 @@ f04acb897ec2  create pricing tables + care_adjustment (pricing_rules, material_p
 3b8164c9fa11  add partner operations tables + order    (partner_facilities, orders.*
               assignment columns                        assignment columns, order_items.*
                                                         inspection columns,
-                                                        order_assignment_history, head)
+                                                        order_assignment_history)
+a4e3ae0f131d  create payment, invoice, and refund      (invoices, invoice_items, payments,
+              tables                                    payment_attempts, payment_events,
+                                                        refunds, head)
 ```
 
-All ten were hand-written to match the models exactly (reviewed rather
+All eleven were hand-written to match the models exactly (reviewed rather
 than a raw `--autogenerate` dump, per the project's migration-safety
 rule). `alembic upgrade head` has been run end-to-end against a real
 PostgreSQL instance (both a local install and, separately, the
 `docker-compose` `postgres` container) — schema, seeded roles, and every
 table/index/constraint verified by querying the database directly, plus
-the full `pytest` suite (327 tests) passing with zero skips against it.
+the full `pytest` suite (362 tests) passing with zero skips against it.
 The newest revision's full `upgrade`/`downgrade`/`upgrade` round-trip
-was also run and verified (the `partner_facilities`/
-`order_assignment_history` tables and every new column dropped cleanly
-on downgrade, recreated identically on re-upgrade) — see "Running
-tests" below.
+was also run and verified (all 6 Phase 10 tables dropped cleanly on
+downgrade, recreated identically on re-upgrade) — see "Running tests"
+below.
 
 ## API documentation (Swagger / ReDoc)
 
@@ -1015,8 +1108,8 @@ that's rolled back on teardown, so they never leave rows behind — except
 concurrency test, which deliberately use independent database
 connections (a genuine race needs separate connections, not one
 connection's savepoints) and clean up manually in a `finally` block.
-Verified end-to-end against a real PostgreSQL instance: **327 passed, 0
-skipped, 0 failed** (up from 300 as of Phase 8) — reproducibly, from a
+Verified end-to-end against a real PostgreSQL instance: **362 passed, 0
+skipped, 0 failed** (up from 327 as of Phase 9) — reproducibly, from a
 cold shell with nothing pre-exported.
 (`tests/conftest.py`'s `DATABASE_URL`/`JWT_SECRET` fallback only applies
 when no `.env` exists — it used to apply unconditionally via
@@ -1085,18 +1178,19 @@ Phase 5   Catalog + Services + Materials
 Phase 6   Pricing Engine
 Phase 7   Availability + Slots + Capacity
 Phase 8   Orders + State Machine
-Phase 9   Partner Operations                                            ← you are here
-Phase 10  Payments + Invoices + Refunds
+Phase 9   Partner Operations
+Phase 10  Payments + Invoices + Refunds                                 ← you are here
 Phase 11  Redis + Celery
 Phase 12  APISIX + etcd
 Phase 13  Flutter Integration
 Phase 14  Production / AWS
 ```
 
-Phase 9 deliberately stops at partner operations: `has_capable_partner`
-(Phase 7) still isn't area-scoped despite `PartnerFacility` now
-existing to support it; no facility-capacity enforcement (the field is
-informational only); no supervisor-vs-partner permission split (both
-remain interchangeable "staff"); no real payment gateway behind
-`PENDING_PAYMENT -> CONFIRMED` (Phase 10 — currently a plain
-staff-triggered status flip). Payments are not started.
+Phase 10 deliberately stops at payments/invoices/refunds: no real
+payment gateway SDK integration (the point is domain correctness, not
+a vendor integration); no separate `InvoiceAdjustment`/credit-note
+model (the spec's own "where appropriate" softened that requirement,
+and `Refund` already covers the primary correction path);
+`PENDING_PAYMENT -> CONFIRMED` is still a plain staff-triggered status
+flip, not automatically driven by a captured payment. Redis/Celery are
+not started.

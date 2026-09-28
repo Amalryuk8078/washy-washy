@@ -9,22 +9,26 @@
 ## 1. What this is
 
 FastAPI backend for **Washy Washy**, a laundry-service platform. Single
-**modular monolith** (not microservices). Currently at **Phase 9 —
-Partner Operations**, built on Phase 0–8 (HTTP skeleton, auth, RBAC,
-users/profiles/addresses/service areas, catalog, pricing, availability/
-slots/capacity, orders/state machine). Phase 9 adds `PartnerFacility`
-(finally establishing the `PartnerProfile <-> ServiceArea` link Phase 7
-deferred), order assignment (facility/pickup operator/delivery
-operator, kept deliberately separate from scheduling, recorded in the
-new `OrderAssignmentHistory`), the `PartnerStatus` onboarding lifecycle,
-and facility-inspection detail (`condition_notes`/`damage_reported` on
-`OrderItem`). Assigning a pickup/delivery operator for the first time
-also drives the matching `OrderStatus` transition, reusing Phase 8's
-state machine rather than duplicating it. This environment's database/
-migrations/Docker have all been verified end-to-end against a real
-PostgreSQL (327/327 tests passing) and `/docs`/`/redoc` carry Washy
-Washy branding — see §6e–§6l and the changelog. Payments are not yet
-implemented.
+**modular monolith** (not microservices). Currently at **Phase 10 —
+Payments / Invoices / Refunds**, built on Phase 0–9 (HTTP skeleton,
+auth, RBAC, users/profiles/addresses/service areas, catalog, pricing,
+availability/slots/capacity, orders/state machine, partner operations).
+Phase 10 adds `Invoice`/`InvoiceItem` (an immutable billing snapshot,
+strictly separate from the order's own operational workflow),
+`Payment`/`PaymentAttempt`/`PaymentEvent`, and `Refund` — all money
+amounts guarded by the same atomic conditional-`UPDATE` pattern Phase 7
+introduced for slot capacity, so an invoice can never be recorded as
+overpaid and a payment can never be refunded past what it actually
+captured, regardless of concurrent requests. A `PaymentGateway`
+abstraction (`ManualPaymentGateway` for this project's own dev/test
+use) keeps the domain logic independent of any concrete provider;
+webhook processing is idempotent via a real database unique constraint
+on the provider's event id, and webhooks are authoritative for final
+payment status, never a client's own claim of success. This
+environment's database/migrations/Docker have all been verified
+end-to-end against a real PostgreSQL (362/362 tests passing) and
+`/docs`/`/redoc` carry Washy Washy branding — see §6e–§6m and the
+changelog.
 
 Target system context (only FastAPI + PostgreSQL exist today; the rest are
 future phases):
@@ -1091,6 +1095,132 @@ GET    /orders/{id}/assignments                        -> own order, or staff
   "staff" for every order/assignment operation, per Phase 8's own
   documented gap — still open).
 
+### 6m. Payments / invoices / refunds (`washy_washy/{services/{invoice_service,payment_service,payment_gateway},repositories/{invoice_repo,invoice_item_repo,payment_repo,payment_attempt_repo,payment_event_repo,refund_repo},api/v1/{routes,controllers}/payments,schemas/payments}.py`) — Phase 10
+
+```text
+POST   /orders/{order_id}/invoice          -> create from a PRICE_FINALIZED order (staff)
+GET    /orders/{order_id}/invoice          -> own order, or staff
+GET    /invoices/{id}                       -> own order, or staff
+POST   /invoices/{id}/finalize              -> staff only
+POST   /invoices/{id}/void                  -> staff only (only while amount_paid == 0)
+POST   /invoices/{id}/payments              -> own order, or staff
+POST   /payments/{id}/charge                -> own order, or staff
+GET    /payments/{id}                        -> own order, or staff
+POST   /payments/{id}/refunds               -> staff only
+GET    /payments/{id}/refunds               -> own order, or staff
+POST   /webhooks/payments                   -> gateway-authenticated (shared secret), not a user
+```
+
+- **Strict separation, per the spec's own framing**: `ORDER` is
+  operational workflow (Phase 8), `INVOICE` is amount owed, `PAYMENT`
+  is money collected, `REFUND` is money returned.
+  `InvoiceService`/`PaymentService` depend on `OrderRepository`/
+  `OrderItemRepository` only to *read* an already-`PRICE_FINALIZED`
+  order's items — neither ever depends on `OrderStateService`, and
+  neither can change an order's own status. The boundary is structural,
+  not just a naming convention.
+- **`Invoice`/`InvoiceItem`** — `Invoice.order_id` is `UNIQUE` (one
+  invoice per order; a correction goes through a refund, never a
+  second bill) and `ON DELETE CASCADE` (an invoice has no meaning
+  without its order — genuinely owned data, the same relationship
+  `OrderItem` has to `Order`, unlike `Order`'s own references to
+  independent resources). `InvoiceItem` snapshots each `OrderItem`'s
+  already-settled `final_line_total` (Phase 8) at invoice-creation
+  time; `order_item_id` is a plain reference (no `ondelete`) back to
+  the source line, for traceability without implying ownership.
+  - **"Immutable after finalization" is enforced by omission, not a
+    runtime check**: no method on `InvoiceService` — or anywhere else
+    — can alter `subtotal`/`tax`/`discount`/`total` once `status`
+    leaves `DRAFT`. There is nothing to "silently mutate" because
+    nothing *can* mutate it, which is the spec's own words taken
+    literally rather than papered over with a guard clause.
+  - `Invoice.amount_paid` is only ever changed via
+    `InvoiceRepository.try_apply_payment` — one atomic conditional
+    `UPDATE` (`WHERE amount_paid + :amount <= total`), the same
+    pattern as `PickupSlotRepository.try_reserve_capacity` (Phase 7)
+    and `OrderRepository.try_transition` (Phase 8) — never a
+    read-then-write. That single statement is what actually prevents
+    an invoice from ever being recorded as overpaid, no matter how
+    many payments capture concurrently.
+- **`Payment`/`PaymentAttempt`/`PaymentEvent`** — three separate
+  tables, matching the spec's own vocabulary exactly, each with a
+  distinct mutability posture: `Payment` (`TimestampMixin`) is the
+  logical payment and its aggregate outcome; `PaymentAttempt`
+  (`TimestampMixin`, mutable) is one try at charging that resolves
+  from `PENDING` to a terminal state in place — a retry after failure
+  is a genuinely new attempt row, not a mutation of the first;
+  `PaymentEvent` (`CreatedAtMixin`, append-only) is a permanent audit
+  log of every event received about a payment, primarily webhook
+  deliveries.
+  - **`Payment.captured_amount`/`refunded_amount`** are only ever
+    changed via `PaymentRepository.try_capture`/`try_refund` — the
+    same atomic-conditional-`UPDATE` pattern again. `try_refund` in
+    particular is the concrete mechanism behind "never refund more
+    than the captured amount" (the spec's own words): the check and
+    the increment happen in one statement, so two concurrent refund
+    requests can never both succeed past the captured amount.
+  - **Webhook idempotency is a real database constraint, not just an
+    application-level check**: `PaymentEvent.provider_event_id` carries
+    a `UNIQUE` constraint. A gateway redelivering the same webhook (as
+    every real provider does) produces a duplicate `INSERT`, which the
+    unique constraint rejects as `IntegrityError`; `PaymentService.
+    handle_webhook` also pre-checks via `get_by_provider_event_id` for
+    a clean no-op response — the same "pre-check for a clean response,
+    database constraint as the real guard against the race" pattern as
+    `RBACService.grant_role_by_name` (Phase 4).
+  - **Webhooks are authoritative for final status** (the spec's own
+    words): `handle_webhook` can move a payment to `CAPTURED`/`FAILED`
+    independent of whatever `charge_payment`'s own synchronous gateway
+    response already set — modeling the real-world case where a
+    gateway's webhook confirms or corrects a payment's outcome after
+    the initial API call returns. A client-side "it succeeded" claim
+    is never trusted as the source of truth by itself.
+- **`PaymentGateway`** (`payment_gateway.py`) — an abstract interface
+  (`charge`/`refund`) plus `ManualPaymentGateway`, a deterministic,
+  always-succeeds implementation for this project's own dev/test use —
+  never a concrete Stripe/Razorpay/etc. integration wired into business
+  logic, per the spec's explicit instruction. `PaymentService` depends
+  only on the interface; swapping in a real provider later means
+  writing one more class here and changing what gets constructed at the
+  app's wiring point, never touching `PaymentService` itself. Tests
+  that need a *failing* charge/refund inject their own small fake
+  implementing the same interface (see `tests/integration/
+  test_payments.py::FakePaymentGateway`) rather than the gateway
+  needing built-in failure-simulation knobs.
+- **`Refund`** — `ON DELETE CASCADE` on `payment_id` (owned data).
+  `refund_payment` reserves capacity via `try_refund` *before* calling
+  the gateway; if the gateway then declines, the reservation is
+  released (`PaymentRepository.release_refund`, the unconditional
+  mirror) and a `FAILED` `Refund` row is still recorded — a declined
+  refund is a fact worth keeping, not a silently-dropped attempt. A
+  successful refund also releases the corresponding amount back off
+  the invoice (`InvoiceRepository.release_payment`) and recomputes the
+  invoice's status (`PAID`/`PARTIALLY_PAID`/`FINALIZED` depending on
+  what remains paid) — refunding money un-pays the bill exactly as
+  much as it was paid, never more, never silently.
+- **Reconciliation** (the spec's own term) — every financial fact is
+  independently queryable and carries its own `provider_reference`:
+  which attempt captured a payment, which event confirmed it, which
+  refund reversed how much of it, and when each happened. Nothing here
+  requires cross-referencing application logs to answer "what actually
+  happened to this money" — the rows themselves are the audit trail.
+- **The webhook endpoint deliberately doesn't use `Authorization:
+  Bearer`** — a payment gateway has no user account in this system.
+  It's authenticated by a shared secret header (`X-Webhook-Secret`,
+  checked against the new `Settings.payment_webhook_secret`) — a
+  deliberately simple stand-in for whatever a real provider's own
+  signature scheme would be (e.g. Stripe's HMAC-based
+  `Stripe-Signature`), sufficient since this project integrates no real
+  gateway.
+- **Not implemented, by design**: no real payment gateway SDK
+  integration (the point of Phase 10 is domain correctness, not a
+  vendor integration); no separate `InvoiceAdjustment`/credit-note
+  model — the spec's own "where appropriate" softened that requirement,
+  and `Refund` already covers the primary "give money back" correction
+  path; no partial-capture-then-separate-capture flow (a payment is
+  charged for its full intended amount in one call); no scheduled/
+  recurring payments.
+
 ### Migrations (`core/migrations/`, Alembic)
 - Owned by `core` since models live in `core/models/`. `washy_washy` has no
   migrations folder of its own.
@@ -1148,7 +1278,7 @@ GET    /orders/{id}/assignments                        -> own order, or staff
      `material_pricing_rules` x2 — two of these FKs use an explicit
      shortened constraint name, see §6k), then `order_status_history`
      (references `orders` and `users`, the latter `ON DELETE SET NULL`).
-  10. `3b8164c9fa11` (head) add partner operations tables and order
+  10. `3b8164c9fa11` add partner operations tables and order
       assignment columns — `partner_facilities` (references
       `partner_profiles`/`service_areas`), then `orders.
       assigned_facility_id`/`pickup_operator_user_id`/
@@ -1156,10 +1286,16 @@ GET    /orders/{id}/assignments                        -> own order, or staff
       `users`, the latter two `ON DELETE SET NULL`), then
       `order_items.condition_notes`/`damage_reported`, then
       `order_assignment_history` (references `orders`/`users`).
+  11. `a4e3ae0f131d` (head) create payment, invoice, and refund tables
+      — `invoices` (references `orders`), then `invoice_items`
+      (references `invoices`/`order_items`), then `payments`
+      (references `invoices`), then `payment_attempts`/`payment_events`
+      (both reference `payments`), then `refunds` (references
+      `payments`).
   `alembic upgrade head` has been run against real PostgreSQL — both a
   local install and, separately, the `docker-compose` `postgres`
-  container — and verified: all 26 tables exist (`alembic_version` +
-  the 25 above) with the four `RoleName` roles seeded. Every multi-table
+  container — and verified: all 32 tables exist (`alembic_version` +
+  the 31 above) with the four `RoleName` roles seeded. Every multi-table
   revision's full `downgrade` → `upgrade head` round-trip has been run
   and verified at the time it was added (tables dropped cleanly,
   recreated identically) — see §9/§10.
@@ -1617,6 +1753,47 @@ established.
   who's assigned **without** trying to re-fire the now-illegal
   `PICKUP_ASSIGNED` transition, and itemizing an item records
   `condition_notes`/`damage_reported` correctly.
+- `unit/test_phase10_models.py` (Phase 10) — no DB required: mapper
+  configuration succeeds, `InvoiceStatus`/`PaymentStatus`/
+  `RefundStatus` each match the spec's own state lists exactly,
+  `Invoice.order_id` is unique with `ON DELETE CASCADE`, `Invoice`
+  defaults to `DRAFT`/`amount_paid=0` and carries all three `CHECK`
+  constraints, `InvoiceItem` has `created_at` but no `updated_at` and
+  its `order_item_id` FK has no `ondelete` while `invoice_id` cascades,
+  `Payment` defaults to `PENDING`/zeroed amounts/`USD` and carries both
+  `CHECK` constraints, `PaymentAttempt` (unlike `PaymentEvent`) has
+  `updated_at` — confirming the deliberate mutable-vs-append-only split
+  — `PaymentEvent` is unique on `provider_event_id`, and `Refund`
+  defaults to `PENDING` with its amount-positive `CHECK` constraint.
+- `integration/test_invoices.py` (Phase 10) — `InvoiceService` against
+  real PostgreSQL: creating an invoice from a `PRICE_FINALIZED` order
+  computes `subtotal`/`total` correctly (plain, and again with tax/
+  discount), snapshots each order item into an `InvoiceItem`, rejects
+  an order that isn't yet `PRICE_FINALIZED`, rejects creating a second
+  invoice for the same order, `finalize_invoice` sets `FINALIZED` +
+  `finalized_at` and rejects being called twice, `void_invoice`
+  succeeds while `amount_paid` is still zero, and a nonexistent invoice
+  raises `NotFoundException`.
+- `integration/test_payments.py` (Phase 10) — `PaymentService` against
+  real PostgreSQL, using a small `FakePaymentGateway` (implementing the
+  same `PaymentGateway` interface `ManualPaymentGateway` does)
+  wherever a test needs to force a failure: a successful charge moves
+  the invoice to `PAID` with the correct `amount_paid`; a failed charge
+  leaves the invoice untouched at `FINALIZED`/`amount_paid=0`; a
+  partial payment moves the invoice to `PARTIALLY_PAID`, and a second
+  payment for the remainder completes it to `PAID`; initiating a
+  payment above the remaining balance is rejected; an invoice's
+  `subtotal`/`total` never change across any of this (immutability);
+  a webhook can independently confirm a capture even when the payment
+  had no prior synchronous confirmation; replaying the *exact same*
+  webhook event three times never double-applies the capture
+  (idempotency); a successful refund releases the corresponding amount
+  back off the invoice and recomputes its status; a partial refund
+  does the same proportionally; a second refund that would exceed the
+  captured amount is rejected (over-refund prevention); refunding a
+  payment with nothing captured yet is rejected; and every attempt/
+  event/refund created along the way is independently queryable with
+  its own `provider_reference` and amount (reconciliation).
 
 ## 9. Current status (keep this section accurate)
 
@@ -1630,38 +1807,110 @@ established.
 | `core/models` — pricing | Implemented (Phase 6): `PricingRule`/`PricingModel`, `MaterialPricingRule` |
 | `core/models` — availability/slots | Implemented (Phase 7): `OperatingHours`/`DayOfWeek`, `PartnerAvailability`, `CapacityUnit`, `PickupSlot`, `DeliverySlot`, `PickupSlotReservation`/`ReservationStatus`, `DeliverySlotReservation` |
 | `core/models` — orders | Implemented (Phase 8): `Order`/`OrderStatus`, `OrderItem`, `OrderStatusHistory` |
-| `core/models` — partner operations | Implemented (Phase 9): `PartnerFacility`, `AssignmentRole`/`OrderAssignmentHistory` — **no payments model yet** (Phase 10) |
+| `core/models` — partner operations | Implemented (Phase 9): `PartnerFacility`, `AssignmentRole`/`OrderAssignmentHistory` |
+| `core/models` — payments | Implemented (Phase 10): `Invoice`/`InvoiceStatus`, `InvoiceItem`, `Payment`/`PaymentStatus`, `PaymentAttempt`, `PaymentEvent`, `Refund`/`RefundStatus` |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
-| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 10 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity → orders → partner operations). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 26 tables exist, 4 roles seeded, full `pytest` suite (327 tests) passes with 0 skips against it |
-| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability`, `orders`, `partner-facilities`, `partners` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, most of `availability`, most of `partner-facilities`/`partners`, and several `orders` operations require `ADMIN` (or, for orders' operational endpoints, any of `ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER`) |
-| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service`, `order_service`, `order_state_service`, `facility_service`, `assignment_service` |
-| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo`, `order_repo`, `order_item_repo`, `order_status_history_repo`, `partner_facility_repo`, `order_assignment_history_repo` |
+| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 11 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity → orders → partner operations → payments/invoices/refunds). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 32 tables exist, 4 roles seeded, full `pytest` suite (362 tests) passes with 0 skips against it |
+| `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability`, `orders`, `partner-facilities`, `partners`, `payments` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, most of `availability`/`partner-facilities`/`partners`/`payments`, and several `orders` operations require `ADMIN` (or, for orders'/payments' operational endpoints, any of `ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER`); the payment webhook endpoint authenticates via a shared secret, not a user token |
+| `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service`, `order_service`, `order_state_service`, `facility_service`, `assignment_service`, `invoice_service`, `payment_service`, `payment_gateway` |
+| `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo`, `order_repo`, `order_item_repo`, `order_status_history_repo`, `partner_facility_repo`, `order_assignment_history_repo`, `invoice_repo`, `invoice_item_repo`, `payment_repo`, `payment_attempt_repo`, `payment_event_repo`, `refund_repo` |
 | `washy_washy/dependencies` | Implemented: `get_current_user`, `require_role`, `require_permission`, `require_any_role` (Phase 8) — wired since Phase 4 |
-| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 14 tags + response-envelope description) |
+| `washy_washy/docs`, `washy_washy/static` | Implemented: branded `/docs`/`/redoc`, `custom_openapi` (tag metadata for all 15 tags + response-envelope description) |
 | `washy_washy/utils` | Empty scaffold |
 | Auth (`/auth/register\|login\|refresh`, JWT issuance/verification) | Implemented (Phase 2) |
-| RBAC runtime (`require_role`/`require_permission`/`require_any_role`) | Implemented (Phase 3, extended Phase 8), enforced on `service-areas`/`roles`/`catalog`/`pricing`/`availability`/`orders`/`partner-facilities`/`partners` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
+| RBAC runtime (`require_role`/`require_permission`/`require_any_role`) | Implemented (Phase 3, extended Phase 8), enforced on `service-areas`/`roles`/`catalog`/`pricing`/`availability`/`orders`/`partner-facilities`/`partners`/`payments` writes; no authorization *middleware* (route-level `dependencies=[...]` only) |
 | Admin role management (`GET /roles`, `GET/POST /users/{id}/roles`, `DELETE /users/{id}/roles/{name}`) | Implemented (post-Phase-4 addendum) — an admin cannot revoke their own `ADMIN` role |
 | Catalog (`Service`/`Material`/compatibility/`PartnerCapability`) | Implemented (Phase 5) — `PartnerCapability` has a service layer but no API endpoint yet |
-| Pricing (`PricingRule`/`MaterialPricingRule`/`calculate_price`) | Implemented (Phase 6) — now snapshotted onto `OrderItem` (Phase 8) |
+| Pricing (`PricingRule`/`MaterialPricingRule`/`calculate_price`) | Implemented (Phase 6) — now snapshotted onto `OrderItem` (Phase 8) and, in turn, onto `InvoiceItem` (Phase 10) |
 | Availability (operating hours, partner availability, pickup/delivery slots + race-free capacity reservation) | Implemented (Phase 7) — `has_capable_partner` remains a global, unenforced check; `PartnerFacility` (Phase 9) makes it *addressable* but wiring real area-scoped enforcement is still deferred |
-| Orders (`Order`/`OrderItem`/`OrderStatusHistory`, 24-state machine, concurrency-safe transitions) | Implemented (Phase 8) — no real payment gateway behind `PENDING_PAYMENT -> CONFIRMED` yet (Phase 10), no delivery-slot scheduling workflow (columns exist, unpopulated) |
+| Orders (`Order`/`OrderItem`/`OrderStatusHistory`, 24-state machine, concurrency-safe transitions) | Implemented (Phase 8) — `PENDING_PAYMENT -> CONFIRMED` is still a plain staff-triggered flip, not driven by a real payment event; no delivery-slot scheduling workflow (columns exist, unpopulated) |
 | Partner operations (`PartnerFacility`, order assignment/reassignment, `PartnerStatus` lifecycle, facility inspection detail) | Implemented (Phase 9) — no facility-level capacity enforcement (informational field only), no supervisor-vs-partner permission split (still interchangeable "staff") |
-| Payments | Not started |
+| Payments (`Invoice`/`Payment`/`PaymentAttempt`/`PaymentEvent`/`Refund`, `PaymentGateway` abstraction, idempotent webhooks, concurrency-safe capture/refund) | Implemented (Phase 10) — no real gateway SDK integration (the point is domain correctness, not a vendor integration); no `InvoiceAdjustment`/credit-note model (deliberately deferred, `Refund` covers the primary correction path); `PENDING_PAYMENT -> CONFIRMED` still not automatically driven by a captured payment |
 | Redis / Celery / APISIX | Not introduced |
-| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 9's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
+| Docker (`docker compose up --build`) | **Verified** repeatedly, including with Phase 10's changes. Docker's engine has intermittently needed the `wsl --shutdown` + relaunch fix again (same root cause as before, not a new bug) — see the changelog below for the original diagnosis. |
 
 Roadmap (see `README.md` for the full phase list): Phase 0 (foundation) →
 Phase 1A–1D (database + identity/RBAC models) → Phase 2 Authentication →
 Phase 3 RBAC runtime → Phase 4: Users/Profiles/Addresses/Service Areas →
 admin role management addendum → Phase 5: Catalog → Phase 6: Pricing
 Engine → Phase 7: Availability / Slots / Capacity → Phase 8: Orders /
-State Machine → **(this update) Phase 9: Partner Operations** →
-Phase 10 Payments/Invoices/Refunds → ... → Phase 14 Production/AWS.
+State Machine → Phase 9: Partner Operations →
+**(this update) Phase 10: Payments / Invoices / Refunds** →
+Phase 11 Redis/Celery → ... → Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-27 (latest)** — Phase 9, Partner Operations:
+- **2026-09-28 (latest)** — Phase 10, Payments / Invoices / Refunds:
+  - Added `core/models/{invoice,invoice_item,payment,payment_attempt,
+    payment_event,refund}.py` (`Invoice`/`InvoiceStatus`, `InvoiceItem`,
+    `Payment`/`PaymentStatus`, `PaymentAttempt`, `PaymentEvent`,
+    `Refund`/`RefundStatus`), all registered in
+    `core/models/__init__.py`.
+  - Added Alembic revision `a4e3ae0f131d` (head) — `invoices`,
+    `invoice_items`, `payments`, `payment_attempts`, `payment_events`,
+    `refunds`, in dependency order. Run against live PostgreSQL;
+    `downgrade`/`upgrade` round-trip verified.
+  - Added `washy_washy/repositories/{invoice,invoice_item,payment,
+    payment_attempt,payment_event,refund}_repo.py`
+    (`InvoiceRepository.try_apply_payment`/`release_payment` and
+    `PaymentRepository.try_capture`/`try_refund`/`release_refund` are
+    the atomic-conditional-`UPDATE` concurrency mechanisms — see §6m),
+    `washy_washy/services/{invoice_service,payment_service,
+    payment_gateway}.py` (`PaymentGateway`/`ManualPaymentGateway`),
+    `washy_washy/schemas/payments.py`,
+    `washy_washy/api/v1/{routes,controllers}/payments.py` — `POST/GET
+    /orders/{id}/invoice`, `GET /invoices/{id}`, `POST
+    /invoices/{id}/{finalize,void,payments}`, `POST
+    /payments/{id}/{charge,refunds}`, `GET
+    /payments/{id}{,/refunds}`, `POST /webhooks/payments`. Added a new
+    `Settings.payment_webhook_secret` (service-level, not shared
+    infra) and its `_verify_webhook_secret` dependency. Added
+    `ORDER_NOT_PRICE_FINALIZED`/`INVOICE_ALREADY_EXISTS`/
+    `INVOICE_NOT_DRAFT`/`INVOICE_NOT_PAYABLE`/`INVOICE_HAS_PAYMENTS`/
+    `PAYMENT_AMOUNT_EXCEEDS_BALANCE`/`PAYMENT_NOT_CHARGEABLE`/
+    `PAYMENT_NOT_REFUNDABLE`/`REFUND_EXCEEDS_CAPTURED_AMOUNT`/
+    `WEBHOOK_UNAUTHORIZED`/`UNKNOWN_PAYMENT_REFERENCE` to
+    `error_{codes,messages}.py`; added a `payments` tag to
+    `docs/openapi.py`.
+  - **Design decisions** (see §6m for full rationale): the
+    `ORDER`/`INVOICE`/`PAYMENT`/`REFUND` separation the spec draws is
+    structural, not just naming — `InvoiceService`/`PaymentService`
+    never depend on `OrderStateService` and can't change an order's
+    status; "immutable after finalization" is enforced by omission
+    (no mutator exists for a finalized invoice's totals), not a
+    runtime check; webhook idempotency is a real database `UNIQUE`
+    constraint on the provider's event id, not just an
+    application-level check; `PaymentGateway` is depended on only as
+    an abstraction, with `ManualPaymentGateway` as this project's own
+    deterministic dev/test implementation; the webhook endpoint
+    authenticates via a shared-secret header instead of a user JWT,
+    since a gateway has no user account here.
+  - Added `tests/unit/test_phase10_models.py`,
+    `tests/integration/test_invoices.py`, and
+    `tests/integration/test_payments.py` (the latter's
+    `FakePaymentGateway` proves `PaymentService` only ever depends on
+    the `PaymentGateway` interface, never concrete provider behavior).
+  - **Not implemented, by design**: no real payment gateway SDK
+    integration; no separate `InvoiceAdjustment`/credit-note model
+    (the spec's own "where appropriate" softened that requirement, and
+    `Refund` already covers the primary correction path); no
+    partial-capture-then-separate-capture flow; `PENDING_PAYMENT ->
+    CONFIRMED` is still a plain staff-triggered flip, not automatically
+    driven by a captured payment.
+  - **Verification**: `ruff check .`/`ruff format --check .` clean;
+    `pytest` — **362 passed, 0 failed** against live PostgreSQL (up
+    from 327). Migration round-trip run for real; every new
+    constraint's name length checked against the 63-byte limit (all
+    fit without needing an override). Live `uvicorn` smoke test: built
+    a full order through `PRICE_FINALIZED`, created and finalized an
+    invoice (confirmed a customer gets `403` creating one), paid it in
+    full via the customer's own token (invoice correctly flipped to
+    `PAID`), confirmed a customer gets `403` attempting a refund,
+    issued a partial refund as admin (invoice correctly flipped to
+    `PARTIALLY_PAID` with the reduced `amount_paid`), and confirmed the
+    webhook endpoint rejects a missing/wrong shared secret with `401`
+    and an unknown payment reference with `404`.
+- **2026-09-27** — Phase 9, Partner Operations:
   - Added `core/models/partner_facility.py` (`PartnerFacility`) and
     `core/models/order_assignment_history.py` (`AssignmentRole`,
     `OrderAssignmentHistory`), all registered in
