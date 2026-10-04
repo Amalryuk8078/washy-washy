@@ -54,7 +54,7 @@ class PaymentService:
         return await self._get_payment(payment_id)
 
     async def initiate_payment(
-        self, invoice_id: uuid.UUID, amount: Decimal, *, currency: str = "USD"
+        self, invoice_id: uuid.UUID, amount: Decimal, *, currency: str = "INR"
     ) -> Payment:
         invoice = await self._invoices.get_by_id(invoice_id)
         if invoice is None:

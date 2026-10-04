@@ -1212,6 +1212,16 @@ POST   /webhooks/payments                   -> gateway-authenticated (shared sec
   signature scheme would be (e.g. Stripe's HMAC-based
   `Stripe-Signature`), sufficient since this project integrates no real
   gateway.
+- **`Payment.currency` defaults to `INR`** (changed from an initial
+  `USD` default shortly after Phase 10 landed, once the target market
+  was confirmed) — a plain `String(3)` column, not DB-enforced, so a
+  caller can still pass any 3-letter code explicitly;
+  `InitiatePaymentRequest`/`PaymentService.initiate_payment` share the
+  same default. The change is its own migration
+  (`b8af1bd42035`) rather than an edit to the already-applied Phase 10
+  migration — altering a migration that's already run against a real
+  database would desync what Alembic thinks happened from what
+  actually did.
 - **Not implemented, by design**: no real payment gateway SDK
   integration (the point of Phase 10 is domain correctness, not a
   vendor integration); no separate `InvoiceAdjustment`/credit-note
@@ -1810,7 +1820,7 @@ established.
 | `core/models` — partner operations | Implemented (Phase 9): `PartnerFacility`, `AssignmentRole`/`OrderAssignmentHistory` |
 | `core/models` — payments | Implemented (Phase 10): `Invoice`/`InvoiceStatus`, `InvoiceItem`, `Payment`/`PaymentStatus`, `PaymentAttempt`, `PaymentEvent`, `Refund`/`RefundStatus` |
 | `core/models` — infra fix | `CreatedAtMixin`/`TimestampMixin` now set `__mapper_args__ = {"eager_defaults": True}` (Phase 4) — see §6f for the `MissingGreenlet` bug this fixes, affecting every model, not just `Address` |
-| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 11 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity → orders → partner operations → payments/invoices/refunds). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 32 tables exist, 4 roles seeded, full `pytest` suite (362 tests) passes with 0 skips against it |
+| `core/migrations` | Implemented: async env, settings-driven URL, deterministic naming, 12 revisions (identity+RBAC → RBAC associations → seed roles → profile/address → service area → catalog → pricing → availability/slots/capacity → orders → partner operations → payments/invoices/refunds → default payment currency to INR). **Verified**: `alembic upgrade head`/`downgrade`/`upgrade` round-trip run against real PostgreSQL (both local and the `docker-compose` container) — all 32 tables exist, 4 roles seeded, full `pytest` suite (362 tests) passes with 0 skips against it |
 | `washy_washy/api/v1` | `health`, `auth`, `users`, `customers`, `addresses`, `service-areas`, `roles`, `catalog`, `pricing`, `availability`, `orders`, `partner-facilities`, `partners`, `payments` (routes + controllers) — most endpoints require authentication; writes on `service-areas`, `roles`, `catalog`, `pricing`, most of `availability`/`partner-facilities`/`partners`/`payments`, and several `orders` operations require `ADMIN` (or, for orders'/payments' operational endpoints, any of `ADMIN`/`SUPERVISOR`/`LAUNDRY_PARTNER`); the payment webhook endpoint authenticates via a shared secret, not a user token |
 | `washy_washy/services` | Implemented: `auth_service`, `rbac_service`, `profile_service`, `address_service`, `service_area_service`, `catalog_service`, `partner_capability_service`, `pricing_service`, `availability_service`, `order_service`, `order_state_service`, `facility_service`, `assignment_service`, `invoice_service`, `payment_service`, `payment_gateway` |
 | `washy_washy/repositories` | Implemented: `user_repo`, `role_repo`, `permission_repo`, `user_role_repo`, `role_permission_repo`, `customer_profile_repo`, `partner_profile_repo`, `address_repo`, `service_area_repo`, `service_repo`, `material_repo`, `service_material_repo`, `partner_capability_repo`, `pricing_rule_repo`, `material_pricing_rule_repo`, `operating_hours_repo`, `partner_availability_repo`, `pickup_slot_repo`, `delivery_slot_repo`, `pickup_slot_reservation_repo`, `delivery_slot_reservation_repo`, `order_repo`, `order_item_repo`, `order_status_history_repo`, `partner_facility_repo`, `order_assignment_history_repo`, `invoice_repo`, `invoice_item_repo`, `payment_repo`, `payment_attempt_repo`, `payment_event_repo`, `refund_repo` |
@@ -1840,7 +1850,31 @@ Phase 11 Redis/Celery → ... → Phase 14 Production/AWS.
 
 ## 10. Changelog
 
-- **2026-09-28 (latest)** — Phase 10, Payments / Invoices / Refunds:
+- **2026-10-04 (latest)** — Default payment currency changed to INR:
+  - Changed `Payment.currency`'s default from `"USD"` to `"INR"` in
+    `core/models/payment.py` (now also setting a matching
+    `server_default`, which the original Phase 10 column only had via
+    the migration, not the model itself), `InitiatePaymentRequest`
+    (`schemas/payments.py`), and `PaymentService.initiate_payment`'s
+    keyword default.
+  - Added Alembic revision `b8af1bd42035` (head) — `ALTER COLUMN
+    payments.currency SET DEFAULT 'INR'` — a new migration rather than
+    editing the already-applied Phase 10 migration in place, since
+    that would desync Alembic's record of what ran from what actually
+    happened against the real database. Run against live PostgreSQL;
+    `downgrade`/`upgrade` round-trip verified (`'INR'` ↔ `'USD'`).
+  - Updated `tests/unit/test_phase10_models.py`'s default-currency
+    assertion.
+  - Currency itself remains caller-specified either way — this only
+    changes what gets stored when a caller omits it.
+  - **Verification**: `ruff check .` clean; `pytest` — **362 passed, 0
+    failed** against live PostgreSQL. Migration round-trip run for
+    real (required restarting the `washy_washy-postgres-1` container,
+    which had stopped existing entirely after a Docker Desktop/WSL2
+    engine restart — recovered via `docker compose up -d postgres`
+    against the still-intact `washy_washy_postgres_data` volume, so no
+    data was lost).
+- **2026-09-28** — Phase 10, Payments / Invoices / Refunds:
   - Added `core/models/{invoice,invoice_item,payment,payment_attempt,
     payment_event,refund}.py` (`Invoice`/`InvoiceStatus`, `InvoiceItem`,
     `Payment`/`PaymentStatus`, `PaymentAttempt`, `PaymentEvent`,

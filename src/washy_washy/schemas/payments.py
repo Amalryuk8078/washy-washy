@@ -47,7 +47,7 @@ class InvoiceWithItemsResponse(InvoiceResponse):
 
 class InitiatePaymentRequest(BaseModel):
     amount: Decimal
-    currency: str = "USD"
+    currency: str = "INR"
 
 
 class PaymentResponse(BaseModel):

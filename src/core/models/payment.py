@@ -53,7 +53,9 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("invoices.id", ondelete="CASCADE"), nullable=False
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, default="INR", server_default="INR"
+    )
     captured_amount: Mapped[Decimal] = mapped_column(
         Numeric(10, 2), nullable=False, default=Decimal("0"), server_default="0"
     )

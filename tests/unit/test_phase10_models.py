@@ -98,7 +98,7 @@ def test_payment_defaults_pending_and_zero_amounts() -> None:
     assert Payment.__table__.c.status.default.arg == PaymentStatus.PENDING.value
     assert Payment.__table__.c.captured_amount.default.arg == Decimal("0")
     assert Payment.__table__.c.refunded_amount.default.arg == Decimal("0")
-    assert Payment.__table__.c.currency.default.arg == "USD"
+    assert Payment.__table__.c.currency.default.arg == "INR"
 
 
 def test_payment_check_constraints() -> None:

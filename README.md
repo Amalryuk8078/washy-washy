@@ -1038,10 +1038,12 @@ f04acb897ec2  create pricing tables + care_adjustment (pricing_rules, material_p
                                                         order_assignment_history)
 a4e3ae0f131d  create payment, invoice, and refund      (invoices, invoice_items, payments,
               tables                                    payment_attempts, payment_events,
-                                                        refunds, head)
+                                                        refunds)
+b8af1bd42035  default payment currency to inr          (payments.currency server default
+                                                        'USD' -> 'INR', head)
 ```
 
-All eleven were hand-written to match the models exactly (reviewed rather
+All twelve were hand-written to match the models exactly (reviewed rather
 than a raw `--autogenerate` dump, per the project's migration-safety
 rule). `alembic upgrade head` has been run end-to-end against a real
 PostgreSQL instance (both a local install and, separately, the
